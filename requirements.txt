@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+mcp-python-sdk
+pyodbc
+python-dotenv
+pydantic
