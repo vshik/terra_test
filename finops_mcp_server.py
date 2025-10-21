@@ -134,8 +134,21 @@ def get_summary(params: GetSummaryParams, ctx: Context) -> GetSummaryResult:
 # if __name__ == "__main__":
 #     # Run server using fastmcp default transport (stdio) or specify HTTP/SSE
 #     mcp.run(transport="http", host="0.0.0.0", port=8000, path="/mcp")  # example HTTP transport
-if __name__ == "__main__":
-    from fastmcp.transports.http import HTTPTransport
-    transport = HTTPTransport(host="0.0.0.0", port=8000, path="/mcp")
-    mcp.run(transport)
+# if __name__ == "__main__":
+#     from fastmcp.transports.http import HTTPTransport
+#     transport = HTTPTransport(host="0.0.0.0", port=8000, path="/mcp")
+#     mcp.run(transport)
 
+if __name__ == "__main__":
+    import asyncio
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    # Create a Streamable HTTP transport for serving your MCP tools
+    transport = StreamableHttpTransport("http://0.0.0.0:8000/mcp")
+
+    # Run the MCP server asynchronously
+    async def main():
+        await mcp.run(transport)
+
+    # Start the asyncio event loop
+    asyncio.run(main())
