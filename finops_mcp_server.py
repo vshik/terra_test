@@ -161,9 +161,3 @@ if __name__ == "__main__":
             print("⚙️ FastMCP server started within an existing event loop (Jupyter/VSCode).")
         else:
             raise
-
-        loop.run_until_complete(main())
-    except RuntimeError:
-        # If the loop is already running (e.g. in Jupyter), use create_task
-        asyncio.create_task(main())
-
