@@ -131,6 +131,11 @@ def get_summary(params: GetSummaryParams, ctx: Context) -> GetSummaryResult:
     conn.close()
     return GetSummaryResult(summary=val)
 
+# if __name__ == "__main__":
+#     # Run server using fastmcp default transport (stdio) or specify HTTP/SSE
+#     mcp.run(transport="http", host="0.0.0.0", port=8000, path="/mcp")  # example HTTP transport
 if __name__ == "__main__":
-    # Run server using fastmcp default transport (stdio) or specify HTTP/SSE
-    mcp.run(transport="http", host="0.0.0.0", port=8000, path="/mcp")  # example HTTP transport
+    from fastmcp.transports.http import HTTPTransport
+    transport = HTTPTransport(host="0.0.0.0", port=8000, path="/mcp")
+    mcp.run(transport)
+
