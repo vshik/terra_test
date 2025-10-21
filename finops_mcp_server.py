@@ -143,12 +143,15 @@ if __name__ == "__main__":
     import asyncio
     from fastmcp.client.transports import StreamableHttpTransport
 
-    # Create a Streamable HTTP transport for serving your MCP tools
     transport = StreamableHttpTransport("http://0.0.0.0:8000/mcp")
 
-    # Run the MCP server asynchronously
     async def main():
         await mcp.run(transport)
 
-    # Start the asyncio event loop
-    asyncio.run(main())
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
+    except RuntimeError:
+        # If the loop is already running (e.g. in Jupyter), use create_task
+        asyncio.create_task(main())
+
