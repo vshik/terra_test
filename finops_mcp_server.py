@@ -149,7 +149,19 @@ if __name__ == "__main__":
         await mcp.run(transport)
 
     try:
-        loop = asyncio.get_event_loop()
+        # Try running normally
+        asyncio.run(main())
+    except RuntimeError as e:
+        # Handle case when there's already a running event loop (e.g., Jupyter)
+        if "already running" in str(e).lower():
+            import nest_asyncio
+            nest_asyncio.apply()
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+            print("⚙️ FastMCP server started within an existing event loop (Jupyter/VSCode).")
+        else:
+            raise
+
         loop.run_until_complete(main())
     except RuntimeError:
         # If the loop is already running (e.g. in Jupyter), use create_task
