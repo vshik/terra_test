@@ -6,6 +6,11 @@ MCP_URL = "http://localhost:8000/mcp"
 
 async def main():
     async with Client(MCP_URL) as client:
+        
+        print("🔹 Listing available FinOps stored procedures...")
+        procs = await client.call_tool("list_stored_procedures")
+        print(procs)
+
         # Example 1: Get total cloud cost
         total_cost = await client.call_tool(
             "usp_GetTotalCloudCost",
