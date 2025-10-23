@@ -71,3 +71,15 @@ raw_response = await send_to_llm(tool_prompt, expect_json=True)  # ✅ enforce J
 tool_info = normalize_tool_json(raw_response)
 
 
+
+from fastmcp import Client as MCPClient  # Make sure fastmcp is installed
+
+async def call_mcp_tool(tool_name, params):
+    """Call an MCP tool using FastMCP's native client protocol."""
+    try:
+        async with MCPClient(MCP_SERVER_URL) as mcp:
+            result = await mcp.call_tool(tool_name, params)
+            return result
+    except Exception as e:
+        return f"Error calling MCP tool '{tool_name}': {e}"
+
