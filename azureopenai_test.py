@@ -1,13 +1,12 @@
 import asyncio
 from openai import AsyncAzureOpenAI
 
-# --- Replace these with your actual details ---
+# --- Replace with your real details ---
 AZURE_OPENAI_ENDPOINT = "https://YOUR-RESOURCE-NAME.openai.azure.com/"
 AZURE_OPENAI_KEY = "YOUR-API-KEY"
-AZURE_OPENAI_DEPLOYMENT = "gpt-4o-mini"  # Replace with your deployed model name
-API_VERSION = "2024-05-01-preview"
+AZURE_OPENAI_DEPLOYMENT = "gpt-4o-mini"  # or gpt-4o / gpt-4.1
+API_VERSION = "2025-03-01-preview"
 
-# --- Async test function ---
 async def test_azure_openai():
     client = AsyncAzureOpenAI(
         azure_endpoint=AZURE_OPENAI_ENDPOINT,
@@ -15,18 +14,16 @@ async def test_azure_openai():
         api_version=API_VERSION,
     )
 
-    # Send a simple prompt
-    response = await client.chat.completions.create(
+    response = await client.responses.create(
         model=AZURE_OPENAI_DEPLOYMENT,
-        messages=[
+        input=[
             {"role": "system", "content": "You are a helpful assistant."},
-            {"role": "user", "content": "Say hello from Azure OpenAI!"}
+            {"role": "user", "content": "Say hello from Azure OpenAI async test!"}
         ],
     )
 
-    print(" Connected successfully!")
-    print("Response:", response.choices[0].message.content)
+    print("Connected successfully!")
+    print("Response:", response.output[0].content[0].text)
 
-# --- Run the async test ---
 if __name__ == "__main__":
     asyncio.run(test_azure_openai())
