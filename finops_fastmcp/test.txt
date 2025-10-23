@@ -83,3 +83,17 @@ async def call_mcp_tool(tool_name, params):
     except Exception as e:
         return f"Error calling MCP tool '{tool_name}': {e}"
 
+
+from fastmcp import Client as MCPClient
+
+async def call_mcp_tool(tool_name, params):
+    """Call an MCP tool using FastMCP's native client protocol."""
+    try:
+        async with MCPClient(MCP_SERVER_URL) as mcp:
+            # ✅ Wrap params correctly
+            payload = {"params": params} if isinstance(params, dict) else {"params": {}}
+            result = await mcp.call_tool(tool_name, payload)
+            return result
+    except Exception as e:
+        return f"❌ Error calling MCP tool '{tool_name}': {e}"
+
