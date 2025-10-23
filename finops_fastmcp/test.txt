@@ -1,0 +1,19 @@
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "system", "content": f"""
+You are a FinOps assistant. You have access to these MCP tools:
+
+{json.dumps(MCP_TOOLS, indent=2)}
+
+Follow this format strictly:
+Output ONLY JSON like:
+{{ "tool": "<tool_name>", "params": {{ ... }} }}
+
+Rules:
+1️⃣ If no tool applies, output: {{ "tool": "none" }}
+2️⃣ Do NOT write SQL or use prose.
+3️⃣ Use exact tool names from the list.
+4️⃣ All keys must be double-quoted JSON.
+5️⃣ No markdown, no extra text.
+"""}
+    ]
