@@ -17,3 +17,57 @@ Rules:
 5️⃣ No markdown, no extra text.
 """}
     ]
+
+
+# -------------------------------------------------------------
+# LLM helper – enforce strict JSON mode
+# -------------------------------------------------------------
+async def send_to_llm(messages, expect_json=False):
+    if expect_json:
+        response = await llm_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            response_format={"type": "json_object"}  # ✅ Hard-enforce JSON mode
+        )
+    else:
+        response = await llm_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages
+        )
+    return response.choices[0].message.content.strip()
+
+
+# -------------------------------------------------------------
+# JSON normalization – fix synonyms and variants
+# -------------------------------------------------------------
+def normalize_tool_json(raw: str) -> dict:
+    """Force output to use {tool, params} keys only."""
+    cleaned = raw.strip().replace("'", '"')
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {"tool": "none"}
+
+    # 🔧 Normalize synonyms
+    if "action" in data and "tool" not in data:
+        data["tool"] = data.pop("action")
+
+    if "parameters" in data and "params" not in data:
+        data["params"] = data.pop("parameters")
+
+    # 🔧 Handle missing params key
+    if "params" not in data:
+        data["params"] = {}
+
+    return data
+
+# Step 1: Ask GPT which tool to call, using strict JSON mode
+tool_prompt = [
+    {"role": "system", "content": "Decide which MCP tool to call. Output valid JSON only."},
+    {"role": "user", "content": user_message}
+]
+raw_response = await send_to_llm(tool_prompt, expect_json=True)  # ✅ enforce JSON
+tool_info = normalize_tool_json(raw_response)
+
+
