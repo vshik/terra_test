@@ -5,12 +5,13 @@ import streamlit as st
 from fastmcp.client import MCPClient
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from fastmcp.openai import get_openai_tools
 
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MCP_URL = os.getenv("FINOPS_MCP_URL", "http://localhost:8000/mcp")
+PAGE_TITLE = "💬 FinOps Chatbot (GPT-4.1 + MCP)"
+PAGE_DESC = "Chat with your FinOps data via an MCP-enabled GPT model."
 
 SYSTEM_PROMPT = """
 You are a FinOps Analyst Assistant helping users analyze and optimize cloud costs
@@ -55,50 +56,53 @@ Always maintain professionalism, transparency, and data governance integrity.
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 mcp = MCPClient(MCP_URL)
 
-st.set_page_config(page_title="FinOps Chatbot", page_icon="💰", layout="wide")
-st.title("FinOps Analyst Assistant")
+# ---  Streamlit UI setup ---
+st.set_page_config(page_title=PAGE_TITLE, layout="centered")
+st.title(PAGE_TITLE)
+st.caption(PAGE_DESC)
 
+# Maintain session state for chat
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-# --- 🔄 Async query handler ---
-async def handle_query(user_message: str):
-    """Send user message to GPT-4.1 with available MCP tools."""
-    st.session_state.messages.append({"role": "user", "content": user_message})
-
-    # ✅ Dynamically generate OpenAI-compatible MCP tool schemas
-    tools = await get_openai_tools(mcp)
-
-    # Call the model
-    response = await openai_client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=st.session_state.messages,
-        tools=tools,
-        tool_choice="auto",
-    )
-
-    # Extract assistant reply
-    message = response.choices[0].message
-    st.session_state.messages.append({"role": "assistant", "content": message.content})
-
-    # Render in Streamlit
-    with st.chat_message("assistant"):
-        st.markdown(message.content or "⚠️ (No reply from assistant)")
-
-    return message
-
-
-# --- 💬 Chat UI interaction ---
-user_input = st.chat_input("Ask a FinOps question (e.g. show top 5 costly resources)")
-
-# Display chat history
+# --- 💬 Display message history ---
 for msg in st.session_state.messages[1:]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# When user sends a message
+# --- ⚙️ Async function for processing messages ---
+async def handle_query(user_message: str):
+    """Send user message to GPT-4.1 with MCP connection context."""
+    st.session_state.messages.append({"role": "user", "content": user_message})
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            response = await client.responses.create(
+                model=MODEL_NAME,
+                input=st.session_state.messages,
+                tools=[
+                    {
+                        "type": "mcp",
+                        "server_label": "finops_mcp",
+                        "server_url": MCP_SERVER_URL,
+                        "require_approval": "never",
+                    }
+                ],
+            )
+
+    # Extract and display LLM output
+    assistant_text = response.output_text or "(No output returned)"
+    st.session_state.messages.append({"role": "assistant", "content": assistant_text})
+
+    st.markdown(assistant_text)
+
+# ---  User input ---
+user_input = st.chat_input("Ask a FinOps question (e.g., show top 5 costly resources)")
+
 if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
 
+    # Run async chat handler
+    import asyncio
     asyncio.run(handle_query(user_input))
