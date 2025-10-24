@@ -107,3 +107,19 @@ WHERE JSON_VALUE(tags, '$.abc') = 'value1'
   AND JSON_VALUE(tags, '$.def') = 'value2';
 
 
+-- Target values
+DECLARE @abc_target NVARCHAR(100) = 'value1';
+DECLARE @def_target NVARCHAR(100) = 'value2';
+
+SELECT
+    id,
+    name,
+    -- Convert single quotes to double quotes to make valid JSON
+    JSON_VALUE(REPLACE(tags, '''', '"'), '$."abc-123"') AS abc_value,
+    JSON_VALUE(REPLACE(tags, '''', '"'), '$."def-456"') AS def_value
+FROM my_table
+WHERE
+    -- Only process rows where JSON_VALUE can extract something
+    JSON_VALUE(REPLACE(tags, '''', '"'), '$."abc-123"') = @abc_target
+    AND JSON_VALUE(REPLACE(tags, '''', '"'), '$."def-456"') = @def_target;
+
