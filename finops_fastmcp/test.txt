@@ -97,3 +97,13 @@ async def call_mcp_tool(tool_name, params):
     except Exception as e:
         return f"❌ Error calling MCP tool '{tool_name}': {e}"
 
+SELECT
+  id,
+  name,
+  JSON_VALUE(tags, '$.abc') AS abc_value,
+  JSON_VALUE(tags, '$.def') AS def_value
+FROM my_table
+WHERE JSON_VALUE(tags, '$.abc') = 'value1'
+  AND JSON_VALUE(tags, '$.def') = 'value2';
+
+
