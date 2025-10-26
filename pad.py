@@ -142,3 +142,51 @@ if prompt := st.chat_input("Ask me to perform FinOps or GitHub actions..."):
                 st.session_state.messages.append(
                     {"role": "assistant", "content": friendly_msg}
                 )
+
+=====================================
+
+# --- Main orchestrator logic ---
+async def orchestrate(user_input: str):
+    """Core orchestration logic for the chatbot."""
+    llm_decision = await ask_llm(user_input)
+    parsed = safe_parse_llm_output(llm_decision)
+
+    tool = parsed.get("tool")
+    params = parsed.get("params", {})
+    message = parsed.get("message")
+
+    # Case 1: Friendly message only
+    if tool == "none":
+        return message or "Hi there! 👋 How can I help you today?"
+
+    # Case 2: Tool found → execute via MCP
+    if tool:
+        result = await call_mcp_tool(tool, params)
+        return result
+
+    # Case 3: Fallback
+    return "I couldn’t determine which tool to use."
+
+
+# --- Streamlit UI ---
+st.set_page_config(page_title="Unified MCP Orchestrator", layout="wide")
+st.title("🤖 Unified MCP Orchestrator")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display chat history
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
+
+if prompt := st.chat_input("Type your question or request..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.chat_message("user").write(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            result = asyncio.run(orchestrate(prompt))
+
+            # Display only the message if tool was "none"
+            st.write(result)
+            st.session_state.messages.append({"role": "assistant", "content": result})
