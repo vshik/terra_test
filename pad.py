@@ -101,3 +101,44 @@ def safe_parse_llm_output(output: str):
             return eval(cleaned)
         except Exception:
             return {"tool": None, "message": f"Could not parse LLM output: {output}"}
+
+
+# --- Streamlit UI ---
+st.set_page_config(page_title="Unified MCP Orchestrator", layout="wide")
+st.title("🤖 Unified MCP Orchestrator Chatbot")
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Display chat history
+for msg in st.session_state.messages:
+    st.chat_message(msg["role"]).write(msg["content"])
+
+# Chat input (async)
+if prompt := st.chat_input("Ask me to perform FinOps or GitHub actions..."):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.chat_message("user").write(prompt)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            llm_decision = await ask_llm(prompt)
+            parsed = safe_parse_llm_output(llm_decision)
+
+            tool_name = parsed.get("tool")
+            params = parsed.get("params", {})
+            message = parsed.get("message")
+
+            if tool_name and tool_name != "none":
+                # Call the appropriate MCP tool
+                result = await call_mcp_tool(tool_name, params)
+                st.write(result)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": str(result)}
+                )
+            else:
+                # Show only the friendly message, not the full dict
+                friendly_msg = message or "I couldn’t find a suitable tool for your request."
+                st.write(friendly_msg)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": friendly_msg}
+                )
