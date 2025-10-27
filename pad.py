@@ -226,3 +226,27 @@ if result.get("tool") == "none":
 
 
 
+# --- Main orchestrator logic ---
+async def orchestrate(user_input: str):
+    """Core orchestration logic for the chatbot."""
+    llm_decision = await ask_llm(user_input)
+    parsed = safe_parse_llm_output(llm_decision)
+
+    tool = parsed.get("tool")
+    params = parsed.get("params", {})
+    message = parsed.get("message")
+
+    # Case 1: Friendly message only
+    if tool == "none":
+        return {"tool": "none", "message": message or "Hi there!  How can I help you today?"}
+
+    # Case 2: Tool found → execute via MCP
+    if tool:
+        try:
+            result = await call_mcp_tool(tool, params)
+            return {"tool": tool, "result": result}
+        except Exception as e:
+            return {"tool": tool, "message": f" Tool execution failed: {str(e)}"}
+
+    # Case 3: Fallback — always return dict, not string
+    return {"tool": "none", "message": "I couldn’t determine which tool to use."}
