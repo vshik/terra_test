@@ -190,3 +190,39 @@ if prompt := st.chat_input("Type your question or request..."):
             # Display only the message if tool was "none"
             st.write(result)
             st.session_state.messages.append({"role": "assistant", "content": result})
+
+
+
+
+if result.get("tool") == "none":
+                # Friendly / fallback message
+                st.write(result.get("message"))
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": result.get("message")}
+                )
+
+            elif isinstance(result.get("result"), dict):
+                data = result["result"].get("data", result["result"])
+                if "columns" in data and "rows" in data:
+                    # Display clean table
+                    st.write(f"**Results from `{result['tool']}`:**")
+                    st.dataframe(data["rows"], columns=data["columns"])
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": f"Displayed table for {result['tool']}"}
+                    )
+                else:
+                    st.write(str(data))
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": str(data)}
+                    )
+            else:
+                st.write(str(result))
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": str(result)}
+                )
+
+
+
+
+
+
