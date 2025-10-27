@@ -250,3 +250,39 @@ async def orchestrate(user_input: str):
 
     # Case 3: Fallback — always return dict, not string
     return {"tool": "none", "message": "I couldn’t determine which tool to use."}
+
+
+
+
+import os
+import subprocess
+from urllib.parse import urlparse
+from pydantic import BaseModel
+from typing import Optional
+from fastmcp import mcp, Context
+
+
+class CloneInput(BaseModel):
+    repo_url: str
+    branch: Optional[str] = "main"
+    base_dir: Optional[str] = "C:\\repos"  # Default clone base directory
+
+
+class CloneOutput(BaseModel):
+    local_path: str
+
+
+@mcp.tool(name="clone_repo", description="Clone a GitHub repo to a specified local directory, keeping repo name as folder name")
+def clone_repo(params: CloneInput, ctx: Context) -> CloneOutput:
+    os.makedirs(params.base_dir, exist_ok=True)        # Ensure base directory exists    
+    repo_name = os.path.splitext(os.path.basename(urlparse(params.repo_url).path))[0]    # Derive folder name from repo URL
+    clone_path = os.path.join(params.base_dir, repo_name)
+    
+    if os.path.exists(clone_path):  # If folder already exists, handle gracefully
+        # Optional: remove existing folder, or pull latest instead
+        raise FileExistsError(f"The folder '{clone_path}' already exists. Remove it or specify another base_dir.")
+    # Clone repo into named folder
+    subprocess.run(["git", "clone", "-b", params.branch, params.repo_url, clone_path], check=True,)
+
+    return CloneOutput(local_path=clone_path)
+
