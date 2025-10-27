@@ -286,3 +286,14 @@ def clone_repo(params: CloneInput, ctx: Context) -> CloneOutput:
 
     return CloneOutput(local_path=clone_path)
 
+
+
+# --- Sidebar ---
+with st.sidebar:
+    st.header("📜 MCP Activity Log")
+    if st.session_state.mcp_logs:
+        for log in reversed(st.session_state.mcp_logs):
+            st.markdown(f"**Tool:** `{log['tool']}`  \n**Params:** `{log['params']}`  \n**Status:** {log['status']}")
+            st.divider()
+    else:
+        st.info("No MCP activity yet...")
