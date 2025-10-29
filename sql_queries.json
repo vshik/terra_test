@@ -1,0 +1,26 @@
+{
+  "get_rightsizing_recommendations": "
+  SELECT a.*
+  FROM [Turbonomic].[vw_VM_Scale_Advice] a
+      INNER JOIN [AZURE].[VMs] vm
+      ON vm.subname = a.account
+      AND vm.resourcegroup = a.resourcegroup
+      AND vm.name = a.[name]
+  WHERE
+      JSON_VALUE(vm.tags, '$.environment') IN (?)
+      AND JSON_VALUE(vm.tags, '$.humana-resource-id') = ?
+  ",
+
+  "get_cost_summary": "
+  SELECT Environment, SUM(Cost) AS TotalCost
+  FROM [FinOps].[CostBreakdown]
+  WHERE BillingPeriod = ?
+  GROUP BY Environment
+  ",
+
+  "get_idle_vms": "
+  SELECT Name, ResourceGroup, Subscription, AvgCPU
+  FROM [FinOps].[VM_Usage]
+  WHERE AvgCPU < 5
+  "
+}
