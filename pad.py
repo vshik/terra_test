@@ -301,13 +301,11 @@ with st.sidebar:
 
 
 
-# --- helper to load query from JSON ---
-def load_query_from_json(query_name: str, file_path: str = "queries/rightsizing_query.json") -> str:
-    """Load a SQL query from a JSON file."""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Query file not found: {file_path}")
-    with open(file_path, "r") as f:
-        queries = json.load(f)
-    if query_name not in queries:
-        raise KeyError(f"Query '{query_name}' not found in {file_path}")
-    return queries[query_name]
+# --- Add normal FastAPI endpoints ---
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/info")
+def info():
+    return {"service": "FinOps GitHub MCP", "status": "running"}
