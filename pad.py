@@ -473,3 +473,33 @@ if __name__ == "__main__":
     finops_data = extract_finops_data(raw_data)
     print(json.dumps(finops_data, indent=4))
 
+
+
+I have a json file that has following type of data. Write python code to extract the data inside 'structured_content'. It has a set of header columns and several rows of data under it. Python code should extract the row values and output a dictionary. Only the variable_values that end with '_after' should be considered. 
+
+The dictionary should look like this -
+
+finops_data = [
+    {
+     "environment_name": "prod",
+     "resource_group_name": "dgo-purview-prod-shirl-vm-0-vm-1",
+     "resource_name": "macs-purview-eastus2-prd-rg",   
+     "variable_name": "vmSize",
+     "variable_value": "Standard_D2ds_v5"
+    },    
+    {
+     "environment_name": "prod",
+     "resource_group_name": "dgo-purview-prod-shirl-vm-0-vm-1",   
+     "resource_name": "macs-purview-eastus2-prd-rg",   
+     "variable_name": "vMemCapacity",
+     "variable_value": 8
+    },
+    {
+     "environment_name": "prod",
+     "resource_group_name": "dgo-purview-prod-shirl-vm-0-datadisk-1",   
+     "resource_name": "macs-purview-eastus2-prd-rg",   
+     "variable_name": "diskTier",
+     "variable_value": "Managed Standard SSD"
+    }        
+    ]
+ 
