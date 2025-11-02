@@ -309,3 +309,86 @@ def health():
 @app.get("/info")
 def info():
     return {"service": "FinOps GitHub MCP", "status": "running"}
+
+
+
+
+# --- Define Input/Output Schemas ---
+class AnalyzeInput(BaseModel):
+    repo_url: str  # e.g., "https://github.com/org/repo_123.git"
+    base_dir: Optional[str] = "C:\\repos"  # Default location for cloned repos
+    branch: Optional[str] = "main"
+
+class AnalyzeOutput(BaseModel):
+    analysis_path: str
+    local_repo_path: str
+
+
+class UpdateInput(BaseModel):
+    repo_path: str
+    analysis_path: str
+    recommendations: dict
+
+
+class UpdateOutput(BaseModel):
+    updated_files: list
+    summary: str
+
+
+# --- Initialize MCP server ---
+mcp = MCP(name="InfraLogic MCP", description="Terraform Analysis and Update Tools")
+
+
+# --- Utility: Clone repo if not already present ---
+async def clone_repo_if_needed(repo_url: str, base_dir: str, branch: str = "main") -> str:
+    """
+    Clone a GitHub repo if not already cloned.
+    Returns the local path to the repo.
+    """
+    repo_name = os.path.splitext(os.path.basename(repo_url))[0]
+    local_path = os.path.join(base_dir, repo_name)
+
+    if os.path.exists(local_path):
+        print(f" Repo already exists at {local_path}, skipping clone.")
+        return local_path
+
+    os.makedirs(base_dir, exist_ok=True)
+    print(f" Cloning {repo_url} → {local_path}")
+
+    try:
+        subprocess.run(
+            ["git", "clone", "-b", branch, repo_url, local_path],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f" Failed to clone repo: {e.stderr}")
+
+    print(f" Repo cloned to {local_path}")
+    return local_path
+
+
+# --- Tool 1: Analyze Infra ---
+@mcp.tool(name="analyze_infra", description="Analyze Terraform repo for right-sizing variables")
+async def analyze_infra(params: AnalyzeInput, ctx: Context) -> AnalyzeOutput:
+    """Clone GitHub repo (if needed) and analyze Terraform files."""
+    repo_url = params.repo_url
+    base_dir = params.base_dir or "C:\\repos"
+    branch = params.branch or "main"
+
+    # Step 1: Clone or reuse repo
+    repo_path = await clone_repo_if_needed(repo_url, base_dir, branch)
+
+    # Step 2: Analyze Terraform files
+    tf_analysis = await asyncio.to_thread(analyze_tf_file, repo_path)
+
+    # Step 3: Extract right-sizing vars
+    rightsizing_info = await asyncio.to_thread(find_rightsizing_vars, tf_analysis)
+
+    # Step 4: Save analysis JSON result
+    output_file = os.path.join(repo_path, "tf_rightsizing_map.json")
+    with open(output_file, "w") as f:
+        json.dump(rightsizing_info, f, indent=2)
+
+    return AnalyzeOutput(analysis_path=output_file, local_repo_path=repo_path)
