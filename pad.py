@@ -423,3 +423,53 @@ def clone_repo(params: CloneInput, ctx: Context) -> CloneOutput:
 
     ctx.log(f" Repo cloned successfully to {clone_path}")
     return CloneOutput(local_path=clone_path)
+
+
+import json
+
+def extract_finops_data(json_data):
+    # Extract structured content
+    structured = json_data.get("result", {}).structured_content
+
+    # Defensive fallback for when structured_content is a dict directly
+    if not isinstance(structured, dict):
+        structured = json_data["result"]["structured_content"]
+
+    columns = structured.get("columns", [])
+    rows = structured.get("rows", [])
+
+    finops_data = []
+
+    # Identify relevant '_after' columns
+    after_columns = [col for col in columns if col.endswith("_after")]
+
+    # Get indices for key fields and after_columns
+    idx_env = columns.index("environment")
+    idx_res_group = columns.index("resourceName")
+    idx_res_name = columns.index("resourceGroupName")
+
+    for row in rows:
+        for col in after_columns:
+            idx = columns.index(col)
+            val = row[idx]
+            if val is not None:
+                # Derive variable name by stripping "_after"
+                var_name = col.replace("_after", "")
+                finops_data.append({
+                    "environment_name": row[idx_env],
+                    "resource_group_name": row[idx_res_group],
+                    "resource_name": row[idx_res_name],
+                    "variable_name": var_name,
+                    "variable_value": val
+                })
+    return finops_data
+
+
+# === Example usage ===
+if __name__ == "__main__":
+    with open("rightsizing.json", "r") as f:
+        raw_data = json.load(f)
+
+    finops_data = extract_finops_data(raw_data)
+    print(json.dumps(finops_data, indent=4))
+
