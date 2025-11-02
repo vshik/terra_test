@@ -409,3 +409,13 @@ clone_result = await clone_repo(CloneInput(repo_url=params.repo_url, base_dir=pa
     })
 
     repo_path = clone_result["local_path"]
+
+
+clone_result = await clone_repo.fn(
+        CloneInput(
+            repo_url=params.repo_url,
+            base_dir=params.base_dir,
+            branch=params.branch
+        ),
+        ctx
+    )
