@@ -398,3 +398,14 @@ async def analyze_infra(params: AnalyzeInput, ctx: Context) -> AnalyzeOutput:
 clone_result = await clone_repo(CloneInput(repo_url=params.repo_url, base_dir=params.base_dir, branch=params.branch), ctx)
 
     repo_path = clone_result.local_repo_path
+
+
+
+# Option 2: Use MCP context for better tracing
+    clone_result = await ctx.call_tool("clone_repo", {
+        "repo_url": params.repo_url,
+        "base_dir": params.base_dir,
+        "branch": params.branch
+    })
+
+    repo_path = clone_result["local_path"]
