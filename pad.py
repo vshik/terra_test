@@ -392,3 +392,9 @@ async def analyze_infra(params: AnalyzeInput, ctx: Context) -> AnalyzeOutput:
         json.dump(rightsizing_info, f, indent=2)
 
     return AnalyzeOutput(analysis_path=output_file, local_repo_path=repo_path)
+
+
+
+clone_result = await clone_repo(CloneInput(repo_url=params.repo_url, base_dir=params.base_dir, branch=params.branch), ctx)
+
+    repo_path = clone_result.local_repo_path
