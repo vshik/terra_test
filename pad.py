@@ -395,27 +395,31 @@ async def analyze_infra(params: AnalyzeInput, ctx: Context) -> AnalyzeOutput:
 
 
 
-clone_result = await clone_repo(CloneInput(repo_url=params.repo_url, base_dir=params.base_dir, branch=params.branch), ctx)
 
-    repo_path = clone_result.local_repo_path
+@mcp.tool(name="clone_repo", description="Clone a GitHub repo to base_dir, keeping repo name as folder name")
+def clone_repo(params: CloneInput, ctx: Context) -> CloneOutput:
+    """Clone repo into base_dir or reuse existing clone."""
+    os.makedirs(params.base_dir, exist_ok=True)
 
+    # Derive folder name from repo URL (e.g., github.com/user/repo.git → repo)
+    repo_name = os.path.splitext(os.path.basename(urlparse(params.repo_url).path))[0]
+    clone_path = os.path.join(params.base_dir, repo_name)
 
+    # If repo already exists locally, handle gracefully - reuse it (and optionally pull latest)
+    if os.path.exists(clone_path):
+        ctx.log(f" Repo already exists at {clone_path}. Skipping clone.")
+        try:
+            # Optional: Pull latest changes to stay up to date
+            subprocess.run(["git", "-C", clone_path, "fetch", "--all"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,)
+            subprocess.run(["git", "-C", clone_path, "reset", "--hard", f"origin/{params.branch}"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,)
+            ctx.log(f"Repo updated to latest branch '{params.branch}'.")
+        except subprocess.CalledProcessError as e:
+            ctx.log(f"Warning: Could not update repo: {e}")
+        return CloneOutput(local_path=clone_path)
 
-# Option 2: Use MCP context for better tracing
-    clone_result = await ctx.call_tool("clone_repo", {
-        "repo_url": params.repo_url,
-        "base_dir": params.base_dir,
-        "branch": params.branch
-    })
+    #  Fresh clone if repo folder doesn’t exist
+    ctx.log(f" Cloning {params.repo_url} into {clone_path} ...")
+    subprocess.run(["git", "clone", "-b", params.branch, params.repo_url, clone_path], check=True,)
 
-    repo_path = clone_result["local_path"]
-
-
-clone_result = await clone_repo.fn(
-        CloneInput(
-            repo_url=params.repo_url,
-            base_dir=params.base_dir,
-            branch=params.branch
-        ),
-        ctx
-    )
+    ctx.log(f" Repo cloned successfully to {clone_path}")
+    return CloneOutput(local_path=clone_path)
