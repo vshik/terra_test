@@ -302,3 +302,5 @@ elif workflow == "general_question":
 
 
 My mcp orchestrator code 'app.py' and 'mcp_server.py' code are given below. List down all the pytest-based automated tests I need to write for the MCP server and orchestrator for CI/CD readiness and for deploying to Azure DevOps Pipelines or GitHub Actions with Azure. Orchestrator 'app.py' code is like the following -
+
+Generate a ready-to-run tests/ folder scaffold (with actual pytest code templates, mocks, and fixtures for all these categories). Give me the actual code for all 26 tests so I can plug it into Azure DevOps or GitHub Action pipeline
