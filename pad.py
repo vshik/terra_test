@@ -297,3 +297,8 @@ Always respond with strict JSON — no markdown, no commentary.
 
 elif workflow == "general_question":
     return llm_output.get("answer")
+
+
+
+
+My mcp orchestrator code 'app.py' and 'mcp_server.py' code are given below. List down all the pytest-based automated tests I need to write for the MCP server and orchestrator for CI/CD readiness and for deploying to Azure DevOps Pipelines or GitHub Actions with Azure. Orchestrator 'app.py' code is like the following -
