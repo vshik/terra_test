@@ -304,3 +304,111 @@ elif workflow == "general_question":
 My mcp orchestrator code 'app.py' and 'mcp_server.py' code are given below. List down all the pytest-based automated tests I need to write for the MCP server and orchestrator for CI/CD readiness and for deploying to Azure DevOps Pipelines or GitHub Actions with Azure. Orchestrator 'app.py' code is like the following -
 
 Generate a ready-to-run tests/ folder scaffold (with actual pytest code templates, mocks, and fixtures for all these categories). Give me the actual code for all 26 tests so I can plug it into Azure DevOps or GitHub Action pipeline
+
+
+# ================================
+# MCP SERVER DOCKERFILE
+# ================================
+
+FROM python:3.11-slim AS base
+
+# Set working directory
+WORKDIR /app
+
+# Prevent Python from writing .pyc files
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Install git + build deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    unixodbc-dev \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for layer caching
+COPY requirements.txt .
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the code
+COPY . .
+
+# Expose MCP server port (default 8100)
+EXPOSE 8100
+
+# Start MCP server
+# Assumes you’re using FastMCP or similar pattern
+CMD ["python", "server.py"]
+
+
+# ================================
+# ORCHESTRATOR (STREAMLIT) DOCKERFILE
+# ================================
+
+FROM python:3.11-slim AS base
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Install system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app source
+COPY . .
+
+# Streamlit defaults
+EXPOSE 8501
+
+# Set environment (Azure OpenAI keys, MCP URL, etc.)
+# These are injected by CI/CD pipeline or docker-compose
+ENV STREAMLIT_SERVER_PORT=8501
+
+# Optional: prevent Streamlit from asking for email at runtime
+ENV STREAMLIT_TELEMETRY=False
+ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=False
+
+# Command to run orchestrator app
+CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+
+version: "3.9"
+
+services:
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile.mcp
+    container_name: finops-mcp
+    ports:
+      - "8100:8100"
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile.orchestrator
+    container_name: finops-orchestrator
+    ports:
+      - "8501:8501"
+    depends_on:
+      - mcp-server
+    environment:
+      - FINOPS_GITHUB_MCP_URL=http://mcp-server:8100/mcp
+      - AZURE_OPENAI_KEY=${AZURE_OPENAI_KEY}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT}
+      - AZURE_OPENAI_DEPLOYMENT=gpt-4.1
