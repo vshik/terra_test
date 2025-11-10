@@ -501,3 +501,38 @@ or
         temperature=0.3,
     )
     return response.choices[0].message.content.strip()
+
+
+
+
+from pydantic import BaseModel
+from fastmcp import CallToolResult
+
+def serialize_result(result):
+    """Convert CallToolResult or Pydantic models to JSON-safe dicts."""
+    if isinstance(result, CallToolResult):
+        # Extract its internal structure
+        data = {
+            "output": serialize_result(result.output),
+            "error": result.error,
+        }
+        return data
+    elif isinstance(result, BaseModel):
+        return result.model_dump()
+    elif isinstance(result, (list, dict, str, int, float, bool)) or result is None:
+        return result
+    else:
+        # Fallback: convert unknown objects to string
+        return str(result)
+
+
+
+serialized_result = serialize_result(result)
+messages.append({
+    "role": "assistant",
+    "content": (
+        f"Tool `{tool}` executed with params {params}. "
+        f"Result:\n{json.dumps(serialized_result, indent=2)}"
+    )
+})
+
