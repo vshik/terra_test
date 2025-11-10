@@ -506,28 +506,31 @@ or
 
 
 from pydantic import BaseModel
-from fastmcp import CallToolResult
 
 def serialize_result(result):
-    """Convert CallToolResult or Pydantic models to JSON-safe dicts."""
-    if isinstance(result, CallToolResult):
-        # Extract its internal structure
-        data = {
-            "output": serialize_result(result.output),
-            "error": result.error,
-        }
-        return data
-    elif isinstance(result, BaseModel):
+    """Safely convert MCP or Pydantic results to JSON-serializable objects."""
+    # If result is a Pydantic model
+    if isinstance(result, BaseModel):
         return result.model_dump()
-    elif isinstance(result, (list, dict, str, int, float, bool)) or result is None:
+
+    # If result looks like an MCP-style object with 'output' or 'error' attributes
+    if hasattr(result, "output") or hasattr(result, "error"):
+        return {
+            "output": serialize_result(getattr(result, "output", None)),
+            "error": getattr(result, "error", None)
+        }
+
+    # If it's a dict, list, or primitive
+    if isinstance(result, (dict, list, str, int, float, bool)) or result is None:
         return result
-    else:
-        # Fallback: convert unknown objects to string
-        return str(result)
+
+    # Fallback: convert to string
+    return str(result)
 
 
 
 serialized_result = serialize_result(result)
+
 messages.append({
     "role": "assistant",
     "content": (
