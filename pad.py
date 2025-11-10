@@ -430,3 +430,74 @@ pyarrow==14.0.2
 
 # Log this activity
 mcp_logs.append({"tool": tool, "params": params, "status": "Success"})
+
+
+
+
+async def orchestrate(user_input: str, mcp_logs: list, messages: list):
+    """Core orchestration logic with context-aware chaining."""
+    # Step 1: Ask LLM for decision
+    llm_decision = await ask_llm(user_input, messages)
+    parsed = safe_parse_llm_output(llm_decision)
+
+    tool = parsed.get("tool")
+    params = parsed.get("params", {})
+    message = parsed.get("message")
+
+    # Step 2: Friendly message only
+    if tool == "none":
+        return {"tool": "none", "message": message or "Hi there! How can I help you today?"}
+
+    # Step 3: Tool found → execute via MCP
+    if tool:
+        result = await call_mcp_tool(tool, params)
+
+        # Record tool execution in logs
+        mcp_logs.append({
+            "tool": tool,
+            "params": params,
+            "status": "Success",
+            "result": result
+        })
+
+        # Feed this tool result back into conversation
+        messages.append({
+            "role": "assistant",
+            "content": f"Tool `{tool}` executed with params {params}. Result:\n{json.dumps(result, indent=2)}"
+        })
+
+        return result
+
+    # Step 4: Fallback
+    return {"tool": "none", "message": "I couldn’t determine which tool to use."}
+
+
+
+async def ask_llm(user_input: str, messages: list) -> str:
+    system_prompt = """
+You are the Orchestrator for the Unified MCP Server that controls FinOps and GitHub tools.
+
+You can reason over conversation history, including tool results.
+
+If a previous tool result is present, use it to generate insights or decide the next tool.
+
+Examples:
+- If user says "summarize that result", read the previous tool output.
+- If user says "run cost validation on that resource", extract resource_id from previous tool output.
+
+Always return **one JSON** object:
+{"tool": "tool_name", "params": {...}}
+or
+{"tool": "none", "params": {}, "message": "text response"}
+"""
+
+    # Include last few turns for context (with tool results)
+    chat_history = [{"role": m["role"], "content": m["content"]} for m in messages[-6:]]
+    chat_history.append({"role": "user", "content": user_input})
+
+    response = await llm_client.chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=[{"role": "system", "content": system_prompt}] + chat_history,
+        temperature=0.3,
+    )
+    return response.choices[0].message.content.strip()
