@@ -426,3 +426,7 @@ RUN apt-get update && apt-get install -y curl apt-transport-https gnupg unixodbc
 
 streamlit==1.36.0
 pyarrow==14.0.2
+
+
+# Log this activity
+mcp_logs.append({"tool": tool, "params": params, "status": "Success"})
