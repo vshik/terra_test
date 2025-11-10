@@ -539,3 +539,53 @@ messages.append({
     )
 })
 
+
+
+
+async def ask_llm(user_input: str, history: list) -> str:
+    """Ask LLM with conversation + tool context awareness."""
+    system_prompt = """
+You are the Orchestrator for the Unified MCP Server that controls FinOps and GitHub tools.
+
+You maintain conversational memory — use the chat history to understand user intent.
+
+If the user refers to something mentioned earlier (like “summarize that”, “use the last output”, or “continue from there”), 
+you must interpret it in light of the previous tool result or system message.
+
+If user greetings or general chat:
+  Return: {"tool": "none", "params": {}, "message": "Hi there! 👋 I can help you with GitHub and FinOps operations."}
+
+Otherwise, choose one of the available tools:
+1. get_rightsizing_recommendations(environment, resource_id)
+2. validate_cost_savings(recommendation_id)
+3. estimate_savings(resource_id)
+4. clone_repo(repo_url)
+5. create_pull_request(branch_name, title, body)
+6. commit_and_push(commit_message)
+
+Respond strictly in JSON format only:
+{"tool": "tool_name", "params": {"param1": "value1"}}
+"""
+
+    # Build message list with full conversation context
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in history[-6:]:  # include last ~6 turns for compact context
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": user_input})
+
+    response = await llm_client.chat.completions.create(
+        model=AZURE_OPENAI_DEPLOYMENT,
+        messages=messages,
+        temperature=0.2,
+    )
+    return response.choices[0].message.content.strip()
+
+
+
+if history and "Tool `" in history[-1]["content"]:
+    messages.append({
+        "role": "system",
+        "content": f"Previous tool output summary:\n{history[-1]['content'][:1000]}"
+    })
+
+
