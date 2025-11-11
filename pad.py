@@ -589,3 +589,13 @@ if history and "Tool `" in history[-1]["content"]:
     })
 
 
+
+SELECT 
+    T1.*, 
+    T2.*
+FROM 
+    T1
+JOIN 
+    T2
+    ON JSON_VALUE(T1.tags, '$.id') = T2.id;
+
