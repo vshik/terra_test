@@ -599,3 +599,44 @@ JOIN
     T2
     ON JSON_VALUE(T1.tags, '$.id') = T2.id;
 
+
+import json, re, ast
+
+def safe_parse_llm_output(raw_text: str):
+    """Try to extract and parse JSON/dict-like output from LLM safely."""
+    if not raw_text or not isinstance(raw_text, str):
+        return {"tool": "none", "params": {}, "message": "Empty or invalid response from LLM."}
+
+    # 1. Clean markdown fences and whitespace
+    clean = raw_text.strip()
+    clean = clean.replace("```json", "").replace("```", "").strip()
+
+    # 2. If multiple dicts, take the last one
+    matches = re.findall(r"\{.*?\}", clean, flags=re.DOTALL)
+    if matches:
+        clean = matches[-1]  # use last dict snippet
+
+    # 3. Try strict JSON first
+    try:
+        parsed = json.loads(clean)
+        if isinstance(parsed, list) and len(parsed) > 0:
+            parsed = parsed[-1]
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # 4. Fallback: try Python literal evaluation (handles single quotes)
+    try:
+        parsed = ast.literal_eval(clean)
+        if isinstance(parsed, list) and len(parsed) > 0:
+            parsed = parsed[-1]
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        # 5. If still not parseable, treat it as plain message
+        return {"tool": "none", "params": {}, "message": raw_text.strip()}
+
+    # 6. Last fallback: return as message
+    return {"tool": "none", "params": {}, "message": raw_text.strip()}
+
