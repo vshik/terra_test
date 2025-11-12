@@ -600,42 +600,49 @@ JOIN
     ON JSON_VALUE(T1.tags, '$.id') = T2.id;
 
 
-import json, re, ast
+import json, re, astimport json, re, ast
 
 def safe_parse_llm_output(raw_text: str):
-    """Try to extract and parse JSON/dict-like output from LLM safely."""
+    """Parse LLM output safely into a consistent schema for the orchestrator."""
+    # Handle None or non-string input
     if not raw_text or not isinstance(raw_text, str):
-        return {"tool": "none", "params": {}, "message": "Empty or invalid response from LLM."}
+        return {"tool": "none", "params": {}, "message": "Empty response from LLM."}
 
-    # 1. Clean markdown fences and whitespace
     clean = raw_text.strip()
     clean = clean.replace("```json", "").replace("```", "").strip()
 
-    # 2. If multiple dicts, take the last one
+    # Try extracting a JSON-like block
     matches = re.findall(r"\{.*?\}", clean, flags=re.DOTALL)
     if matches:
-        clean = matches[-1]  # use last dict snippet
+        clean = matches[-1]  # take the last block
 
-    # 3. Try strict JSON first
+    # 1️. Try strict JSON parsing
     try:
         parsed = json.loads(clean)
-        if isinstance(parsed, list) and len(parsed) > 0:
-            parsed = parsed[-1]
         if isinstance(parsed, dict):
             return parsed
+        elif isinstance(parsed, list) and parsed and isinstance(parsed[-1], dict):
+            return parsed[-1]
     except json.JSONDecodeError:
         pass
 
-    # 4. Fallback: try Python literal evaluation (handles single quotes)
+    # 2️. Try Python literal eval (handles single quotes)
     try:
         parsed = ast.literal_eval(clean)
-        if isinstance(parsed, list) and len(parsed) > 0:
-            parsed = parsed[-1]
         if isinstance(parsed, dict):
             return parsed
+        elif isinstance(parsed, list) and parsed and isinstance(parsed[-1], dict):
+            return parsed[-1]
     except Exception:
-        # 5. If still not parseable, treat it as plain message
-        return {"tool": "none", "params": {}, "message": raw_text.strip()}
+        pass
+
+    # 3️. If it's plain text (no JSON at all)
+    if not ("{" in clean and "}" in clean):
+        return {"tool": "none", "params": {}, "message": clean}
+
+    # 4️. Final fallback — never break caller expectations
+    return {"tool": "none", "params": {}, "message": f"Unrecognized LLM output: {raw_text}"}
+
 
     # 6. Last fallback: return as message
     return {"tool": "none", "params": {}, "message": raw_text.strip()}
