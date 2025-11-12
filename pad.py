@@ -642,8 +642,3 @@ def safe_parse_llm_output(raw_text: str):
 
     # 4️. Final fallback — never break caller expectations
     return {"tool": "none", "params": {}, "message": f"Unrecognized LLM output: {raw_text}"}
-
-
-    # 6. Last fallback: return as message
-    return {"tool": "none", "params": {}, "message": raw_text.strip()}
-
