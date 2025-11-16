@@ -642,3 +642,49 @@ def safe_parse_llm_output(raw_text: str):
 
     # 4️. Final fallback — never break caller expectations
     return {"tool": "none", "params": {}, "message": f"Unrecognized LLM output: {raw_text}"}
+
+
+
+async def run_proactive_stage(latest_user_msg: str, assistant_response: str, history: list):
+    """
+    Takes the assistant's response and asks the model:
+    - Should I suggest a next step?
+    - Should I remind about required parameters?
+    - Should I propose continuing the workflow?
+    """
+
+    proactive_prompt = f"""
+    You are the secondary reasoning module of a 2-stage proactive assistant.
+    The user said: {latest_user_msg}
+    The assistant responded: {assistant_response}
+
+    Based on BOTH, decide if you should propose a proactive follow-up.
+    Proactive suggestions include:
+      - relevant next-step actions
+      - recommended workflows
+      - useful follow-up insights the user didn’t ask but would benefit from
+    
+    Respond STRICTLY in JSON:
+    {{
+       "should_suggest": true/false,
+       "suggestion": "text of the suggestion (empty if none)"
+    }}
+    """
+
+    response = await llm_client.chat.completions.create(
+        model=AZURE_DEPLOYMENT_NAME,
+        messages=[
+            {"role": "system", "content": proactive_prompt},
+        ],
+        temperature=0.2,
+    )
+
+    parsed = json.loads(response.choices[0].message.content)
+    return parsed
+
+
+# Run the proactive LLM stage
+proactive = await run_proactive_stage(user_input, final_answer, st.session_state.chat_history)
+
+if proactive.get("should_suggest"):
+    final_answer += "\n\n💡 *Suggested next step:* " + proactive["suggestion"]
