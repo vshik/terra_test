@@ -687,4 +687,4 @@ async def run_proactive_stage(latest_user_msg: str, assistant_response: str, his
 proactive = await run_proactive_stage(user_input, final_answer, st.session_state.chat_history)
 
 if proactive.get("should_suggest"):
-    final_answer += "\n\n💡 *Suggested next step:* " + proactive["suggestion"]
+    final_answer += "\n\n *Suggested next step:* " + proactive["suggestion"]
