@@ -688,3 +688,12 @@ proactive = await run_proactive_stage(user_input, final_answer, st.session_state
 
 if proactive.get("should_suggest"):
     final_answer += "\n\n *Suggested next step:* " + proactive["suggestion"]
+
+
+
+I have some code below for an MCP application including a finops+github+infra MCP server, a client (orchestrator agent) and a chatbot (in streamlit).
+It can support single MCP tool calls as well as workflows. 
+However, my workflow "run_update_right_size_workflow" is written in plain python. 
+I want to revamp the code to do multi-step proactive workflow orchestration using LangChain + LangGraph. 
+Guide me best approach to do it.
+Below, I am pasting my "MCP Server", "Orchestrator" and "Streamlit UI" codes for reference.
