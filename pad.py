@@ -815,3 +815,53 @@ def build_rightsize_workflow():
     graph.on_error(on_error)
     return graph.compile()
 
+
+
+from langchain.tools import StructuredTool
+import asyncio
+
+def mcp_tool_wrapper(
+    tool_name: str,
+    param_schema: dict,
+    description: str,
+    mcp_url: str,
+):
+    """
+    Wrap an MCP tool as a LangChain StructuredTool.
+
+    Args:
+        tool_name (str): Name of the MCP tool to call on the MCP server.
+        param_schema (dict): Dict of parameter names with default values (used to build signature).
+        description (str): Description for LangChain.
+        mcp_url (str): MCP server endpoint.
+
+    Returns:
+        StructuredTool: LangChain tool ready to use.
+    """
+
+    async def _run_mcp(**kwargs):
+        from orchestrator_core import call_mcp_tool   # or your actual import
+        return await call_mcp_tool(tool_name, kwargs)
+
+    # Sync wrapper required because LangChain tools must be sync
+    def sync_wrapper(**kwargs):
+        return asyncio.run(_run_mcp(**kwargs))
+
+    # Build a function signature dynamically from param_schema
+    sync_wrapper.__annotations__ = {k: type(v) for k, v in param_schema.items()}
+    sync_wrapper.__name__ = tool_name
+
+    return StructuredTool.from_function(
+        func=sync_wrapper,
+        name=tool_name,
+        description=description,
+    )
+
+
+clone_tool = mcp_tool_wrapper(
+    tool_name="clone_repo",
+    param_schema={"repo_url": "", "branch": "main"},
+    description="Clone a GitHub repository.",
+    mcp_url=MCP_URL,
+)
+
