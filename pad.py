@@ -898,3 +898,13 @@ def build_rightsize_graph():
     )
 
     # Continue with edges...
+
+
+graph.add_conditional_edges(
+    "check_recommendations",
+    lambda st: st.route,
+    {
+        "update_infra": "update_infra",
+        "no_changes": END
+    }
+)
