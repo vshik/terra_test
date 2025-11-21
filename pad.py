@@ -865,3 +865,36 @@ clone_tool = mcp_tool_wrapper(
     mcp_url=MCP_URL,
 )
 
+
+
+# -----------------------------------------
+# 3️. ROUTER NODE — END EARLY LOGIC (FIXED)
+# -----------------------------------------
+def check_recommendations(state: RightSizeState):
+    """Router must always return a dict, not a string."""
+    recos = state.recommendations
+
+    if recos == [{}] or recos == []:
+        return {"route": "END"}
+
+    return {"route": "update_infra"}
+
+
+# -----------------------------------------
+# 4️. GRAPH DEFINITION (FIXED CONDITIONAL)
+# -----------------------------------------
+def build_rightsize_graph():
+    graph = StateGraph(RightSizeState)
+
+    # register nodes...
+
+    graph.add_conditional_edges(
+        "check_recommendations",
+        lambda st: st["route"],
+        {
+            "END": END,
+            "update_infra": "update_infra",
+        }
+    )
+
+    # Continue with edges...
