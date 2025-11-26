@@ -23,6 +23,48 @@ def safe_parse_llm_output(raw_text: str):
     if matches:
         clean = matches[-1]
 
+
+
+
+async def ask_llm(user_input: str, history: list) -> str:
+    """
+    Ask LLM to decide which workflow or tool to execute with conversation + tool context awareness.
+    """
+
+    system_prompt = """
+    You are the Orchestrator for the Astra MCP Server system...
+    (your existing prompt unchanged)
+    """
+
+    # Build correct message list
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Include last 6 valid chat messages only
+    for msg in history[-6:]:
+        if "role" in msg and "content" in msg:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+    # Add current user turn
+    messages.append({"role": "user", "content": user_input})
+
+    # Call LLM
+    response = await llm_client.chat.completions.create(
+        model=AZURE_DEPLOYMENT_NAME,
+        messages=messages,
+        temperature=0.2,
+    )
+
+    output = response.choices[0].message.content.strip()
+
+    # Normalize JSON response
+    cleaned = output.replace("```json", "").replace("```", "").strip()
+
+    return json.loads(cleaned)
+
+
     # Try strict JSON parsing
     try:
         return json.loads(clean)
@@ -908,3 +950,52 @@ graph.add_conditional_edges(
         "no_changes": END
     }
 )
+
+
+
+
+
+
+=================
+
+
+async def ask_llm(user_input: str, history: list) -> str:
+    """
+    Ask LLM to decide which workflow or tool to execute with conversation + tool context awareness.
+    """
+
+    system_prompt = """
+    You are the Orchestrator for the Astra MCP Server system...
+    (your existing prompt unchanged)
+    """
+
+    # Build correct message list
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Include last 6 valid chat messages only
+    for msg in history[-6:]:
+        if "role" in msg and "content" in msg:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+
+    # Add current user turn
+    messages.append({"role": "user", "content": user_input})
+
+    # Call LLM
+    response = await llm_client.chat.completions.create(
+        model=AZURE_DEPLOYMENT_NAME,
+        messages=messages,
+        temperature=0.2,
+    )
+
+    output = response.choices[0].message.content.strip()
+
+    # Normalize JSON response
+    cleaned = output.replace("```json", "").replace("```", "").strip()
+
+    return json.loads(cleaned)
+
+================================
+
