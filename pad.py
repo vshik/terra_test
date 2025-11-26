@@ -999,3 +999,105 @@ async def ask_llm(user_input: str, history: list) -> str:
 
 ================================
 
+# ============================================================
+# Custom MCP HTTP Client (for listing tools, manual calls)
+# ============================================================
+import aiohttp
+
+class McpHttpClient:
+    def __init__(self, base_url: str):
+        self.base_url = base_url
+        self.session = aiohttp.ClientSession()
+
+    async def list_tools(self):
+        """
+        Fetch all tools exposed by the MCP server.
+        Expects MCP Server exposes GET /tools
+        """
+        async with self.session.get(f"{self.base_url}/tools") as resp:
+            return await resp.json()
+
+    async def call_tool(self, tool_name: str, params: dict):
+        """
+        Call a specific MCP tool.
+        Expects POST /tools/<tool_name>
+        """
+        async with self.session.post(
+            f"{self.base_url}/tools/{tool_name}", json=params
+        ) as resp:
+            return await resp.json()
+
+    async def close(self):
+        await self.session.close()
+
+==============================
+
+@app.get("/show_tools")
+async def show_tools():
+    client = McpHttpClient(MCP_URL.replace("/mcp", ""))   # Point directly to server root
+    tools = await client.list_tools()
+    await client.close()
+    return {"tools": tools}
+
+===============================
+
+from fastapi import FastAPI
+
+app = FastAPI(title="Astra MCP Server")
+
+# Example tool registry (fastmcp handles actual MCP tools, we keep REST metadata)
+REGISTERED_TOOLS = {}
+
+
+# When defining tools using fastmcp decorator:
+from fastmcp import tool
+
+@tool
+async def clone_repo(repo_url: str, branch: str):
+    ...
+# Register for REST listing
+REGISTERED_TOOLS["clone_repo"] = {
+    "description": "Clone a git repo",
+    "params": ["repo_url", "branch"]
+}
+
+
+@tool
+async def get_rightsizing_recommendations(environment: str, app_id: str):
+    ...
+REGISTERED_TOOLS["get_rightsizing_recommendations"] = {
+    "description": "Get finops rightsize recommendations",
+    "params": ["environment", "app_id"]
+}
+
+
+# ============================================================
+# REST ENDPOINT: GET /tools
+# ============================================================
+@app.get("/tools")
+async def list_tools():
+    """
+    REST endpoint for orchestrator. Returns all tools.
+    """
+    return {"tools": REGISTERED_TOOLS}
+
+
+# OPTIONAL: Call tool via REST (useful for testing)
+@app.post("/tools/{tool_name}")
+async def call_tool(tool_name: str, params: dict):
+    """
+    Allows REST clients (your orchestrator) to call MCP tools.
+
+    But internally we still use fastmcp tool execution.
+    """
+    if tool_name not in REGISTERED_TOOLS:
+        return {"error": f"Unknown tool: {tool_name}"}
+
+    # Import the tool function dynamically
+    fn = globals().get(tool_name)
+    if not fn:
+        return {"error": f"Tool not found in globals: {tool_name}"}
+
+    result = await fn(**params)
+    return {"result": result}
+
