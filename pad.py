@@ -1208,3 +1208,142 @@ metadata_file="metadata.json"
 
 response = router_agent(user_query)
 print(response)
+
+
+
+
+from langchain.tools import tool
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableSequence
+
+# Your existing update functions
+from your_file import (
+    update_terraform_file_locals_type,
+    update_terraform_file_yaml_type
+)
+
+# ---------------------------------------------------------
+# 1. Wrap your two update functions as LangChain tools
+# ---------------------------------------------------------
+
+@tool
+def locals_updater(terraform_file: str, metadata_file: str, updates: list, similarity_threshold: float = 0.75):
+    """Update a Terraform LOCALS file."""
+    return update_terraform_file_locals_type(terraform_file, metadata_file, updates, similarity_threshold)
+
+
+@tool
+def yaml_updater(terraform_file: str, metadata_file: str, updates: list, similarity_threshold: float = 0.75):
+    """Update a Terraform YAML file."""
+    return update_terraform_file_yaml_type(terraform_file, metadata_file, updates, similarity_threshold)
+
+
+TOOLS = {
+    "locals_updater": locals_updater,
+    "yaml_updater": yaml_updater,
+}
+
+
+# ---------------------------------------------------------
+# 2. LLM used everywhere
+# ---------------------------------------------------------
+
+llm = ChatOpenAI(model="gpt-4.1", temperature=0)
+
+
+# ---------------------------------------------------------
+# 3. Router prompt
+# ---------------------------------------------------------
+
+ROUTER_PROMPT = PromptTemplate(
+    input_variables=["input"],
+    template="""
+You are a routing agent.
+
+Decide which updater tool the user needs.
+
+Rules:
+- If the file is HCL or contains 'locals {{ ... }}' → choose "locals_updater"
+- If the file is YAML → choose "yaml_updater"
+
+Return ONLY one word:
+locals_updater
+OR
+yaml_updater
+
+User request:
+{input}
+"""
+)
+
+
+router_chain = (
+    ROUTER_PROMPT
+    | llm
+    | StrOutputParser()
+)
+
+
+# ---------------------------------------------------------
+# 4. Router agent wrapper
+# ---------------------------------------------------------
+
+def router_agent(user_input: str):
+    """Decide which updater tool to invoke."""
+    decision = router_chain.invoke({"input": user_input}).strip()
+
+    print(f"\n Router decision → {decision}\n")
+
+    if decision not in TOOLS:
+        return f"Router error: unknown tool '{decision}'"
+
+    # Run actual tool
+    tool_fn = TOOLS[decision]
+
+    # Extract arguments from user input (LLM can help)
+    # Quick heuristic: we run a small parser prompt
+    parse_prompt = PromptTemplate(
+        input_variables=["input"],
+        template="""
+Extract the following fields from the text and return ONLY JSON:
+
+- terraform_file
+- metadata_file
+- updates (array)
+
+Text:
+{input}
+"""
+    )
+
+    parsed = (
+        parse_prompt
+        | llm
+        | StrOutputParser()
+    ).invoke({"input": user_input})
+
+    import json
+    args = json.loads(parsed)
+
+    # Call tool with proper arguments
+    return tool_fn.invoke(args)
+
+
+# ---------------------------------------------------------
+# 5. Example
+# ---------------------------------------------------------
+
+query = """
+Please update this locals.tf file using metadata.json.
+Updates list:
+[
+  {"environment_name": "dev", "resource_group_name": "rg1",
+   "resource_name": "sql", "variable_name": "max-size-gb", "variable_value": 50}
+]
+terraform_file="locals.tf"
+metadata_file="metadata.json"
+"""
+
+print(router_agent(query))
