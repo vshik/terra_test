@@ -1101,3 +1101,110 @@ async def call_tool(tool_name: str, params: dict):
     result = await fn(**params)
     return {"result": result}
 
+
+from langchain.tools import tool
+from langchain.agents import initialize_agent, AgentType
+from langchain.prompts import PromptTemplate
+from langchain.llms import OpenAI
+from langchain.agents import AgentExecutor, Tool
+from langchain.chains import LLMChain
+from langchain.agents import load_tools
+
+# ---------------------------------------------------------
+# 1. Wrap your two update functions as LangChain tools
+# ---------------------------------------------------------
+
+@tool("locals_updater")
+def locals_updater_tool(terraform_file: str, metadata_file: str, updates: list, similarity_threshold: float = 0.75):
+    """Update a Terraform LOCALS file using update_terraform_file_locals_type()."""
+    return update_terraform_file_locals_type(terraform_file, metadata_file, updates, similarity_threshold)
+
+
+@tool("yaml_updater")
+def yaml_updater_tool(terraform_file: str, metadata_file: str, updates: list, similarity_threshold: float = 0.75):
+    """Update a Terraform YAML file using update_terraform_file_yaml_type()."""
+    return update_terraform_file_yaml_type(terraform_file, metadata_file, updates, similarity_threshold)
+
+
+# ---------------------------------------------------------
+# 2. Create the sub-agents (each one bound to its tool)
+# ---------------------------------------------------------
+
+llm = OpenAI(temperature=0)
+
+locals_updater_agent = initialize_agent(
+    tools=[locals_updater_tool],
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+)
+
+yaml_updater_agent = initialize_agent(
+    tools=[yaml_updater_tool],
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True,
+)
+
+# ---------------------------------------------------------
+# 3. Router agent prompt (LLM decides which sub-agent to use)
+# ---------------------------------------------------------
+
+ROUTER_PROMPT = """
+You are the updater_agent.
+
+Your job: choose which updater sub-agent to call based on user instructions.
+
+Use the rules:
+
+- If the Terraform file uses `locals { ... }` or is an HCL file → CALL `locals_updater`.
+- If the Terraform file is YAML → CALL `yaml_updater`.
+
+Return ONLY the tool call. Do NOT answer directly.
+
+User request:
+{input}
+"""
+
+router_prompt = PromptTemplate(
+    input_variables=["input"],
+    template=ROUTER_PROMPT
+)
+
+router_chain = LLMChain(llm=llm, prompt=router_prompt)
+
+# ---------------------------------------------------------
+# 4. Router Agent Logic (custom)
+# ---------------------------------------------------------
+
+def router_agent(user_input: str):
+    """LLM chooses the correct sub-agent, then executes it."""
+    decision = router_chain.run(user_input)
+
+    if "locals_updater" in decision:
+        print("\n🔧 Router selected: locals_updater_agent\n")
+        return locals_updater_agent.run(user_input)
+
+    if "yaml_updater" in decision:
+        print("\n🔧 Router selected: yaml_updater_agent\n")
+        return yaml_updater_agent.run(user_input)
+
+    return "Router could not determine which updater to use."
+
+
+# ---------------------------------------------------------
+# 5. Example Usage
+# ---------------------------------------------------------
+
+user_query = """
+Please update this locals.tf file using metadata.json.
+Updates list:
+[
+  {"environment_name": "dev", "resource_group_name": "rg1", "resource_name": "sql", "variable_name": "max-size-gb", "variable_value": 50}
+]
+terraform_file="locals.tf"
+metadata_file="metadata.json"
+"""
+
+response = router_agent(user_query)
+print(response)
