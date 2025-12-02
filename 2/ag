@@ -1,0 +1,27 @@
+# mcp_server.py
+
+from fastmcp import MCPServer, HTTPTransport
+from fastmcp.types import ToolResponse
+
+# Your update implementations
+from yaml_updater import yaml_updater
+from locals_updater import locals_updater
+
+server = MCPServer("update-tools-server")
+
+@server.tool()
+def yaml_updater_tool(yaml_file_path: str, updates: dict) -> ToolResponse:
+    return ToolResponse(content=str(yaml_updater(yaml_file_path, updates)))
+
+@server.tool()
+def locals_updater_tool(terraform_file: str, metadata_file: str, updates: list) -> ToolResponse:
+    return ToolResponse(content=str(locals_updater(terraform_file, metadata_file, updates)))
+
+if __name__ == "__main__":
+    HTTPTransport(
+        server=server,
+        host="0.0.0.0",
+        port=8000,
+        allow_cors=True,
+        openapi_path="/openapi.json",
+    ).run()
