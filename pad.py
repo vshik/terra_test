@@ -1347,3 +1347,14 @@ metadata_file="metadata.json"
 """
 
 print(router_agent(query))
+
+
+
+yaml_updater_tool_lc = StructuredTool.from_function(
+    name="yaml_updater_tool",
+    description="Updates specified fields inside a YAML file.",
+    func=lambda yaml_file, metadata_file, updates: yaml_updater_tool(
+        yaml_file, metadata_file, updates
+    ),
+    args_schema=YamlUpdaterInput,
+)
