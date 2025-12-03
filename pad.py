@@ -1440,3 +1440,90 @@ async def load_mcp_tools():
         tools.append(tool)
 
     return tools
+
+
+
+
+# mcp_tool_loader.py
+
+import json
+import asyncio
+from fastmcp import HTTPClient
+from pydantic import BaseModel, create_model
+from langchain.tools import StructuredTool
+
+MCP_SERVER_URL = "http://mcp-server:8000"
+
+
+async def load_mcp_tools():
+    client = HTTPClient(MCP_SERVER_URL)
+    await client.connect()
+
+    discovery = await client.list_tools()
+    tools = []
+
+    for tool_def in discovery.tools:
+        tool_name = tool_def.name
+        tool_description = tool_def.description or f"MCP tool {tool_name}"
+
+        # --- Build args schema (dynamic Pydantic model) ---
+        schema_props = tool_def.inputSchema.get("properties", {})
+        required = tool_def.inputSchema.get("required", [])
+
+        fields = {}
+        for param_name, param_info in schema_props.items():
+            json_type = param_info.get("type", "string")
+
+            if json_type == "string":
+                annotation = str
+            elif json_type == "integer":
+                annotation = int
+            elif json_type == "number":
+                annotation = float
+            elif json_type == "boolean":
+                annotation = bool
+            elif json_type == "array":
+                annotation = list
+            elif json_type == "object":
+                annotation = dict
+            else:
+                annotation = str
+
+            if param_name in required:
+                fields[param_name] = (annotation, ...)
+            else:
+                fields[param_name] = (annotation, None)
+
+        ArgsSchema = create_model(f"{tool_name}_schema", **fields)
+
+        # --- Async MCP caller ---
+        async def async_caller(**kwargs):
+            result = await client.call_tool(tool_name, kwargs)
+            return result.content
+
+        # --- Sync wrapper SAFE inside running event loop ---
+        def sync_wrapper(**kwargs):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No loop running → normal synchronous call
+                return asyncio.run(async_caller(**kwargs))
+
+            # Loop already running → schedule task & wait
+            future = asyncio.run_coroutine_threadsafe(
+                async_caller(**kwargs), loop
+            )
+            return future.result()
+
+        # --- Create StructuredTool ---
+        tool = StructuredTool.from_function(
+            name=tool_name,
+            description=tool_description,
+            func=sync_wrapper,
+            args_schema=ArgsSchema,
+        )
+
+        tools.append(tool)
+
+    return tools
+
