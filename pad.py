@@ -1770,3 +1770,95 @@ async def yaml_updater_tool(yaml_file, metadata_file, updates):
 # ----------------------------
 if __name__ == "__main__":
     asyncio.run(mcp.run(host="0.0.0.0", port=8000))
+
+
+
+888888888888888
+
+# mcp_server.py
+import asyncio
+from fastmcp import MCP
+
+mcp = MCP("terraform-mcp")
+
+@mcp.tool()
+async def locals_updater_tool(input: dict):
+    """
+    input = {
+        "terraform_file": "...",
+        "metadata_file": "...",
+        "updates": [...],
+        "similarity_threshold": 0.75
+    }
+    """
+
+    terraform_file = input.get("terraform_file")
+    metadata_file = input.get("metadata_file")
+    updates = input.get("updates", [])
+    threshold = input.get("similarity_threshold", 0.75)
+
+    # call your real logic
+    return {
+        "status": "ok",
+        "file": terraform_file,
+        "updates_applied": len(updates),
+        "threshold": threshold
+    }
+
+
+@mcp.tool()
+async def yaml_updater_tool(input: dict):
+    """
+    input = {
+        "yaml_file": "...",
+        "metadata_file": "...",
+        "updates": [...]
+    }
+    """
+
+    yaml_file = input.get("yaml_file")
+    metadata_file = input.get("metadata_file")
+    updates = input.get("updates", [])
+
+    return {
+        "status": "ok",
+        "file": yaml_file,
+        "updates_applied": len(updates)
+    }
+
+
+if __name__ == "__main__":
+    asyncio.run(mcp.run(host="0.0.0.0", port=8000))
+
+
+# mcp_tool_loader.py
+import json
+from fastmcp import HTTPClient
+from langchain_core.tools import StructuredTool
+
+MCP_SERVER_URL = "http://mcp-server:8000"
+
+async def load_mcp_tools():
+    client = HTTPClient(MCP_SERVER_URL)
+    await client.connect()
+
+    discovery = await client.list_tools()
+    tools = []
+
+    for tool_def in discovery.tools:
+
+        async def _caller(arg_dict, tool_name=tool_def.name):
+            result = await client.call_tool(tool_name, arg_dict)
+            return result.content
+
+        # Every tool now takes ONE dict → so we wrap it with StructuredTool
+        tools.append(
+            StructuredTool.from_function(
+                name=tool_def.name,
+                description=tool_def.description,
+                func=_caller,
+            )
+        )
+
+    return tools
+
