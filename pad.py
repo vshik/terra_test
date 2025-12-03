@@ -1703,3 +1703,70 @@ if __name__ == "__main__":
     asyncio.run(main())
 
 
+
+
+
+# mcp_server.py
+import asyncio
+from fastmcp import MCP
+
+mcp = MCP("terraform-mcp")
+
+# ----------------------------
+# LOCALS TOOL
+# ----------------------------
+
+@mcp.tool(
+    name="locals_updater_tool",
+    description="Updates a Terraform locals file with metadata values.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "terraform_file": {"type": "string"},
+            "metadata_file": {"type": "string"},
+            "updates": {"type": "array"},
+            "similarity_threshold": {"type": "number"},
+        },
+        "required": ["terraform_file", "metadata_file", "updates"]
+    }
+)
+async def locals_updater_tool(terraform_file, metadata_file, updates, similarity_threshold=0.75):
+    # Replace with your actual logic
+    return {
+        "status": "success",
+        "message": f"Updated locals in {terraform_file}",
+        "updates_count": len(updates),
+    }
+
+
+# ----------------------------
+# YAML TOOL
+# ----------------------------
+
+@mcp.tool(
+    name="yaml_updater_tool",
+    description="Updates a YAML file with metadata values.",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "yaml_file": {"type": "string"},
+            "metadata_file": {"type": "string"},
+            "updates": {"type": "array"},
+        },
+        "required": ["yaml_file", "metadata_file", "updates"]
+    }
+)
+async def yaml_updater_tool(yaml_file, metadata_file, updates):
+    # Replace with your actual logic
+    return {
+        "status": "success",
+        "message": f"Updated YAML file {yaml_file}",
+        "updates_count": len(updates),
+    }
+
+
+# ----------------------------
+# START SERVER
+# ----------------------------
+if __name__ == "__main__":
+    asyncio.run(mcp.run(host="0.0.0.0", port=8000))
