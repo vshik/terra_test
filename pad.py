@@ -1358,3 +1358,85 @@ yaml_updater_tool_lc = StructuredTool.from_function(
     ),
     args_schema=YamlUpdaterInput,
 )
+
+
+# mcp_tool_loader.py
+
+import json
+import asyncio
+from fastmcp import HTTPClient
+from langchain.tools import StructuredTool
+from pydantic import create_model, BaseModel
+
+MCP_SERVER_URL = "http://mcp-server:8000"
+
+
+async def load_mcp_tools():
+    """Connect to MCP server and load tools as LangChain StructuredTool objects."""
+    client = HTTPClient(MCP_SERVER_URL)
+    await client.connect()
+
+    discovery = await client.list_tools()
+    tools = []
+
+    for tool_def in discovery.tools:
+        tool_name = tool_def.name
+        tool_description = tool_def.description or f"MCP tool {tool_name}"
+
+        # ---- 1. Build args_schema from MCP tool parameters ----
+        # Each MCP tool declares its parameters as JSON schema
+        schema_props = tool_def.inputSchema.get("properties", {})
+        required = tool_def.inputSchema.get("required", [])
+
+        # Dynamically create a Pydantic model
+        fields = {}
+        for param_name, param_info in schema_props.items():
+            # Try best-effort type detection
+            json_type = param_info.get("type", "string")
+            if json_type == "string":
+                py_type = (str, ...)
+            elif json_type == "number":
+                py_type = (float, ...)
+            elif json_type == "integer":
+                py_type = (int, ...)
+            elif json_type == "boolean":
+                py_type = (bool, ...)
+            elif json_type == "array":
+                py_type = (list, ...)
+            elif json_type == "object":
+                py_type = (dict, ...)
+            else:
+                py_type = (str, ...)
+
+            # Required field marker
+            if param_name not in required:
+                py_type = (py_type[0], None)
+
+            fields[param_name] = py_type
+
+        ArgsSchema = create_model(
+            f"{tool_name}_schema",
+            **fields,
+            __base__=BaseModel
+        )
+
+        # ---- 2. MCP async caller ----
+        async def _mcp_caller(**kwargs):
+            result = await client.call_tool(tool_name, kwargs)
+            return result.content
+
+        # Wrap async function for StructuredTool (must sync)
+        def sync_wrapper(**kwargs):
+            return asyncio.run(_mcp_caller(**kwargs))
+
+        # ---- 3. Build StructuredTool ----
+        tool = StructuredTool.from_function(
+            name=tool_name,
+            description=tool_description,
+            func=sync_wrapper,
+            args_schema=ArgsSchema,
+        )
+
+        tools.append(tool)
+
+    return tools
