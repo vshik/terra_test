@@ -1862,3 +1862,5 @@ async def load_mcp_tools():
 
     return tools
 
+async def _caller(**kwargs):
+    return await client.call_tool(name, kwargs)
