@@ -1893,3 +1893,39 @@ async def load_mcp_tools():
         )
 
     return tools
+
+
+
+async def load_mcp_tools():
+    async with Client(MCP_SERVER_URL) as client:
+        discovery = await client.list_tools()
+        tools = []
+
+        for tool_def in discovery:
+
+            async def _caller(input: dict, tool_name=tool_def.name):
+                # caller accepts ONLY 'input' + captures tool_name via default
+                async with Client(MCP_SERVER_URL) as c2:
+                    result = await c2.call_tool(tool_name, {"arg_dict": input})
+                    return result.content
+
+            # IMPORTANT: define signature to SINGLE ARG
+            _caller.__signature__ = inspect.Signature(
+                parameters=[
+                    inspect.Parameter(
+                        "input",
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    )
+                ]
+            )
+
+            tool = StructuredTool.from_function(
+                name=tool_def.name,
+                description=tool_def.description,
+                func=_caller,
+            )
+
+            tools.append(tool)
+
+    return tools
+
