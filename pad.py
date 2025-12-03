@@ -1527,3 +1527,179 @@ async def load_mcp_tools():
 
     return tools
 
+
+
+
+# mcp_server.py
+import asyncio
+from fastmcp import MCP, Tool, Schema
+
+mcp = MCP("terraform-mcp")
+
+
+# ----------------------------
+# TOOL DEFINITIONS
+# ----------------------------
+
+@mcp.tool(
+    name="locals_updater_tool",
+    description="Updates a Terraform locals file with metadata values.",
+    input_schema=Schema(
+        {
+            "terraform_file": {"type": "string"},
+            "metadata_file": {"type": "string"},
+            "updates": {"type": "array"},
+            "similarity_threshold": {"type": "number"}
+        },
+        required=["terraform_file", "metadata_file", "updates"]
+    )
+)
+async def locals_updater_tool(terraform_file, metadata_file, updates, similarity_threshold=0.75):
+    # Place your business logic here
+    return {
+        "status": "success",
+        "message": f"Updated locals in {terraform_file}",
+        "updates": updates
+    }
+
+
+@mcp.tool(
+    name="yaml_updater_tool",
+    description="Updates a YAML file with metadata values.",
+    input_schema=Schema(
+        {
+            "yaml_file": {"type": "string"},
+            "metadata_file": {"type": "string"},
+            "updates": {"type": "array"},
+        },
+        required=["yaml_file", "metadata_file", "updates"]
+    )
+)
+async def yaml_updater_tool(yaml_file, metadata_file, updates):
+    # Place your business logic here
+    return {
+        "status": "success",
+        "message": f"Updated YAML file {yaml_file}",
+        "updates": updates
+    }
+
+
+# ----------------------------
+# START SERVER
+# ----------------------------
+if __name__ == "__main__":
+    asyncio.run(mcp.run(host="0.0.0.0", port=8000))
+
+
+
+# langchain_agent.py
+import asyncio
+import json
+from pydantic import create_model
+from fastmcp import HTTPClient
+
+from langchain_openai import ChatOpenAI
+from langchain_core.tools import StructuredTool
+from langchain.agents import initialize_agent, AgentType
+
+
+MCP_SERVER_URL = "http://mcp-server:8000"
+
+
+async def load_mcp_tools():
+    """Discover MCP tools and wrap them as LangChain StructuredTool."""
+    client = HTTPClient(MCP_SERVER_URL)
+    await client.connect()
+
+    discovery = await client.list_tools()
+    tools = []
+
+    for tool_def in discovery.tools:
+        name = tool_def.name
+        description = tool_def.description or f"MCP tool: {name}"
+
+        # build pydantic args schema dynamically
+        schema_props = tool_def.inputSchema.get("properties", {})
+        required = tool_def.inputSchema.get("required", [])
+
+        fields = {}
+        for param_name, prop in schema_props.items():
+            json_type = prop.get("type", "string")
+
+            typemap = {
+                "string": str,
+                "number": float,
+                "integer": int,
+                "boolean": bool,
+                "array": list,
+                "object": dict,
+            }
+            annotation = typemap.get(json_type, str)
+
+            if param_name in required:
+                fields[param_name] = (annotation, ...)
+            else:
+                fields[param_name] = (annotation, None)
+
+        ArgsSchema = create_model(f"{name}_schema", **fields)
+
+        # async→sync wrapper
+        async def async_mcp_call(**kwargs):
+            result = await client.call_tool(name, kwargs)
+            return result.content
+
+        def sync_wrapper(**kwargs):
+            try:
+                loop = asyncio.get_running_loop()
+                future = asyncio.run_coroutine_threadsafe(
+                    async_mcp_call(**kwargs), loop
+                )
+                return future.result()
+            except RuntimeError:
+                return asyncio.run(async_mcp_call(**kwargs))
+
+        tool = StructuredTool.from_function(
+            name=name,
+            description=description,
+            func=sync_wrapper,
+            args_schema=ArgsSchema,
+        )
+
+        tools.append(tool)
+
+    return tools
+
+
+# ----------------------------
+# Run the agent
+# ----------------------------
+
+async def main():
+    tools = await load_mcp_tools()
+
+    llm = ChatOpenAI(model="gpt-4.1", temperature=0)
+
+    agent = initialize_agent(
+        tools,
+        llm,
+        agent=AgentType.OPENAI_FUNCTIONS,
+        verbose=True,
+    )
+
+    query = """
+Update the YAML file c:\\xyz\\proj\\file.yaml 
+using metadata c:\\xyz\\proj\\meta.json.
+Updates list:
+[
+  {"resource": "abc", "value": 123}
+]
+"""
+
+    result = agent.run(query)
+    print("\nFINAL RESULT:\n", result)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
