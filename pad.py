@@ -1929,3 +1929,30 @@ async def load_mcp_tools():
 
     return tools
 
+
+async def load_mcp_tools():
+    async with Client(MCP_SERVER_URL) as client:
+        discovery = await client.list_tools()
+        tools = []
+
+        for tool_def in discovery:
+
+            def make_caller(tool_name):
+                async def _caller(**kwargs):
+                    async with Client(MCP_SERVER_URL) as client2:
+                        result = await client2.call_tool(tool_name, kwargs)
+                        return result.content
+                return _caller
+
+            caller_fn = make_caller(tool_def.name)
+
+            tools.append(
+                StructuredTool.from_function(
+                    name=tool_def.name,
+                    description=tool_def.description,
+                    func=caller_fn,
+                )
+            )
+
+        return tools
+
