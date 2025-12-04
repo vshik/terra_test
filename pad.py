@@ -1956,3 +1956,41 @@ async def load_mcp_tools():
 
         return tools
 
+
+
+async def parent_executor(user_input: str):
+    # Step 1: Router decides
+    chosen_tool = await router.ainvoke({"input": user_input})
+    chosen_tool = chosen_tool.strip()
+
+    print("Router chose:", chosen_tool)
+
+    # Step 2: Extract args
+    extract_prompt = PromptTemplate(
+        input_variables=["input"],
+        template="""
+Extract JSON arguments required for the tool call.
+
+Return ONLY a valid JSON object with:
+- terraform_file
+- metadata_file
+- updates
+
+User text:
+{input}
+"""
+    )
+
+    extractor = extract_prompt | llm | StrOutputParser()
+    parsed_json = await extractor.ainvoke({"input": user_input})
+    args = json.loads(parsed_json)
+
+    # Step 3: Call correct subagent
+    if chosen_tool == "yaml_updater_tool":
+        return await yaml_agent.ainvoke(json.dumps(args))
+
+    if chosen_tool == "locals_updater_tool":
+        return await locals_agent.ainvoke(json.dumps(args))
+
+    return f"Unknown tool: {chosen_tool}"
+
