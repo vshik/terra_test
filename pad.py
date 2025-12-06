@@ -1994,3 +1994,144 @@ User text:
 
     return f"Unknown tool: {chosen_tool}"
 
+
+
+
+-----------------------------------
+
+Updated ask_llm()
+
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.runnables import RunnableSequence
+
+# LLM wrapper for routing decisions
+router_llm = ChatOpenAI(
+    model=AZURE_DEPLOYMENT_NAME,
+    api_key=AZURE_OPENAI_API_KEY,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    api_version=AZURE_API_VERSION,
+    temperature=0.0
+)
+
+def ask_llm(user_input: str, history: list) -> dict:
+    """
+    LLM router: decides which workflow to execute.
+    Returns: Dict {workflow, tool, params, ...}
+    """
+
+    system_prompt = """
+You are the Orchestrator Router. 
+You decide what action the MCP Orchestrator must take.
+
+Always return **strict JSON**:
+{
+  "workflow": "...",
+  "tool": "...",
+  "params": {...},
+  "answer": "..."
+}
+"""
+
+    # Build chat history messages
+    hist_msgs = []
+    for msg in history[-6:]:
+        hist_msgs.append({"role": msg["role"], "content": msg["content"]})
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        *[(m["role"], m["content"]) for m in hist_msgs],
+        ("user", user_input)
+    ])
+
+    chain = RunnableSequence([
+        prompt,
+        router_llm,
+        JsonOutputParser()
+    ])
+
+    result = chain.invoke({})
+    return result  # already a dict
+
+
+----------------------------------------------
+
+Langgraph router setup
+
+
+
+
+from langgraph.graph import StateGraph, END
+
+class OrchestratorState(BaseModel):
+    user_input: str
+    route: dict = None
+    mcp_logs: list = []
+    messages: list = []
+
+def route_node(state: OrchestratorState):
+    return state.route["workflow"]
+
+async def general_question_node(state: OrchestratorState):
+    return {"final_answer": state.route["answer"]}
+
+async def single_tool_node(state: OrchestratorState):
+    tool = state.route["tool"]
+    params = state.route["params"]
+    result = await call_mcp_tool(MCP_URL, tool, params)
+    return {"final_answer": result}
+
+async def workflow_node(state: OrchestratorState):
+    if state.route["workflow"] == "update_rightsize_workflow":
+        repo = state.route["params"]["repo"]
+        env = state.route["params"]["environment"]
+        result = await run_update_rightsize_workflow(repo, env)
+        return {"final_answer": result}
+    return {"final_answer": "Unsupported workflow"}
+
+
+-------------------------------
+
+
+Update orchestrate()
+
+
+
+async def orchestrate(user_input: str, mcp_logs: list, messages: list):
+    # 1. Call LLM router
+    route = ask_llm(user_input, messages)
+
+    # 2. Create graph state
+    state = OrchestratorState(
+        user_input=user_input,
+        messages=messages,
+        mcp_logs=mcp_logs,
+        route=route
+    )
+
+    # 3. Build tiny LangGraph
+    graph = StateGraph(OrchestratorState)
+    graph.add_node("route", lambda s: {"route": s.route})
+    graph.set_entry_point("route")
+
+    graph.add_edge("route", state.route["workflow"])
+
+    graph.add_node("general_question", general_question_node)
+    graph.add_node("single_tool", single_tool_node)
+    graph.add_node("update_rightsize_workflow", workflow_node)
+
+    graph.add_edge("general_question", END)
+    graph.add_edge("single_tool", END)
+    graph.add_edge("update_rightsize_workflow", END)
+
+    app = graph.compile()
+
+    # 4. Execute
+    result_state = await app.ainvoke(state)
+
+    return result_state["final_answer"]
+
+
+
+
