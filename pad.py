@@ -2132,6 +2132,125 @@ async def orchestrate(user_input: str, mcp_logs: list, messages: list):
 
     return result_state["final_answer"]
 
+=========================================================================
+
+def build_orchestrator_prompt(tools: list):
+    """
+    tools = output of client.list_tools()
+    expected structure:
+    [
+        { "name": "...", "description": "...", "input_schema": {...} },
+        ...
+    ]
+    """
+
+    # Format tools for LLM
+    tool_lines = []
+    for t in tools:
+        schema_str = ", ".join([f"{k}: {v}" for k, v in t.get("input_schema", {}).items()])
+        tool_lines.append(f"- {t['name']}({schema_str})  # {t.get('description','')}")
+    tools_text = "\n".join(tool_lines)
+
+    return f"""
+You are the Orchestrator for the Unified MCP Server.
+
+You decide which workflow applies to the user's request.
+There are exactly four possible workflows:
+
+1. **single_tool**  
+   When the user requests one clear MCP tool action.
+   Output format:
+   {{
+     "workflow": "single_tool",
+     "tool": "<tool_name>",
+     "params": {{ ... }}
+   }}
+
+2. **update_rightsize_repo**  
+   When the user asks to update rightsizing variables or run any 
+   repo update related to rightsizing.
+   Output format:
+   {{
+     "workflow": "update_rightsize_repo",
+     "params": {{
+         "repo": "<repo_url>",
+         "environment": "<env>"
+     }}
+   }}
+
+3. **general_question**  
+   When the user asks an informational, unrelated, or conversational question.
+   Output format:
+   {{
+     "workflow": "general_question",
+     "answer": "<your normal-language answer>"
+   }}
+
+4. **greetings**  
+   When the user greets you ("hi", "hello", "hey", etc.).
+   Output:
+   {{
+     "workflow": "greetings",
+     "message": "Hello! I can help you automate FinOps and Infra operations."
+   }}
+
+------------------------------------------------------------
+Available MCP Tools (auto-discovered):
+{tools_text}
+------------------------------------------------------------
+
+Rules:
+- ALWAYS return **strict JSON** only.
+- NEVER invent tools. Use only the tools listed above.
+- Extract parameters carefully based on natural-language cues.
+- Pick exactly one workflow per request.
+- If the request clearly matches a tool: use **single_tool**.
+- If the request is asking to update rightsizing repo/environment: use **update_rightsize_repo**.
+- If casual conversation or explanation: **general_question**.
+- If greeting: **greetings**.
+"""
+
+
+async def ask_llm(user_input: str, history: list, mcp_client):
+    """
+    mcp_client = fastmcp.Client(MCP_URL)
+    """
+
+    # -------------------------------------------------------------
+    # 1. Fetch tools from MCP server dynamically
+    # -------------------------------------------------------------
+    tools = await mcp_client.list_tools()   # <- IMPORTANT
+
+    # -------------------------------------------------------------
+    # 2. Build the dynamic system prompt using the helper function
+    # -------------------------------------------------------------
+    system_prompt = build_orchestrator_prompt(tools)
+
+    # -------------------------------------------------------------
+    # 3. Construct the final messages for the LLM
+    # -------------------------------------------------------------
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # last 6 messages only
+    for msg in history[-6:]:
+        content = msg["content"]
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        messages.append({"role": msg["role"], "content": content})
+
+    messages.append({"role": "user", "content": user_input})
+
+    # -------------------------------------------------------------
+    # 4. Call LLM
+    # -------------------------------------------------------------
+    response = await llm.ainvoke(messages)
+
+    # LLM always returns plain JSON (string) because of prompt
+    result_text = response.content.strip()
+
+    return result_text
 
 
 
+async with Client(MCP_URL) as mcp_client:
+    llm_output_text = await ask_llm(user_input, history, mcp_client)
