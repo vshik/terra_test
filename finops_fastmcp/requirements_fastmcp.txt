@@ -1,6 +1,0 @@
-fastmcp
-fastapi
-uvicorn[standard]
-pyodbc
-python-dotenv
-pydantic
