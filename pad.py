@@ -349,3 +349,70 @@ User text:
 
 
 
+
+
+
+Setup database:-
+
+import sqlite3
+import json
+from datetime import datetime
+
+DB_PATH = "checkpoints.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS checkpoints (
+            id INTEGER PRIMARY KEY,
+            state_json TEXT NOT NULL,
+            updated_at TIMESTAMP NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+
+Save checkpoint -
+
+def save_checkpoint_sqlite(state: OrchestratorState):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    data = json.dumps({
+        "messages": state.messages,
+        "mcp_logs": state.mcp_logs,
+        "route": state.route,
+        "user_input": state.user_input
+    })
+
+    cur.execute("""
+        INSERT OR REPLACE INTO checkpoints (id, state_json, updated_at)
+        VALUES (1, ?, ?)
+    """, (data, datetime.utcnow().isoformat()))
+
+    conn.commit()
+    conn.close()
+
+
+Load checkpoint -
+
+def load_checkpoint_sqlite():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("SELECT state_json FROM checkpoints WHERE id = 1")
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return None
+
+    return json.loads(row[0])
+
+
+
+
