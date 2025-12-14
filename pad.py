@@ -346,72 +346,95 @@ User text:
 
     return f"Unknown tool: {chosen_tool}"
 
+----
+
+from langgraph.checkpoint.sqlite import AsyncSQLiteSaver
+
+checkpointer = AsyncSQLiteSaver("checkpoints.db")
+
+async def get_last_n_checkpoints(thread_id: str, n: int = 6):
+    checkpoints = []
+    async for ckpt in checkpointer.list(thread_id):
+        checkpoints.append(ckpt)
+    return checkpoints[-n:]
 
 
-
-
-
-
-Setup database:-
-
-import sqlite3
-import json
-from datetime import datetime
-
-DB_PATH = "checkpoints.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS checkpoints (
-            id INTEGER PRIMARY KEY,
-            state_json TEXT NOT NULL,
-            updated_at TIMESTAMP NOT NULL
+def extract_messages(checkpoints):
+    messages = []
+    for _, checkpoint, _ in checkpoints:
+        messages.extend(
+            checkpoint.get("channel_values", {}).get("messages", [])
         )
-    """)
-    conn.commit()
-    conn.close()
-
-init_db()
+    return messages
 
 
-Save checkpoint -
-
-def save_checkpoint_sqlite(state: OrchestratorState):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    data = json.dumps({
-        "messages": state.messages,
-        "mcp_logs": state.mcp_logs,
-        "route": state.route,
-        "user_input": state.user_input
-    })
-
-    cur.execute("""
-        INSERT OR REPLACE INTO checkpoints (id, state_json, updated_at)
-        VALUES (1, ?, ?)
-    """, (data, datetime.utcnow().isoformat()))
-
-    conn.commit()
-    conn.close()
+def extract_mcp_logs(checkpoints):
+    logs = []
+    for _, checkpoint, _ in checkpoints:
+        logs.extend(
+            checkpoint.get("channel_values", {}).get("mcp_logs", [])
+        )
+    return logs
 
 
-Load checkpoint -
+import asyncio
+import streamlit as st
 
-def load_checkpoint_sqlite():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+from checkpoint_utils import (
+    get_last_n_checkpoints,
+    extract_messages,
+    extract_mcp_logs,
+)
 
-    cur.execute("SELECT state_json FROM checkpoints WHERE id = 1")
-    row = cur.fetchone()
-    conn.close()
 
-    if not row:
-        return None
+THREAD_ID = st.session_state.get("thread_id", "usr123")
 
-    return json.loads(row[0])
+if "chat_history" not in st.session_state:
+    checkpoints = asyncio.run(
+        get_last_n_checkpoints(THREAD_ID, n=6)
+    )
+
+    st.session_state.chat_history = extract_messages(checkpoints)
+    st.session_state.mcp_logs = extract_mcp_logs(checkpoints)
+
+
+from langchain_core.messages import HumanMessage, AIMessage
+
+for msg in st.session_state.chat_history:
+    if isinstance(msg, HumanMessage):
+        st.chat_message("user").write(msg.content)
+    elif isinstance(msg, AIMessage):
+        st.chat_message("assistant").write(msg.content)
+
+
+with st.sidebar:
+    st.subheader("MCP Logs")
+    for log in st.session_state.mcp_logs:
+        st.code(log)
+
+
+if user_input := st.chat_input("Ask something"):
+    st.chat_message("user").write(user_input)
+
+    # Run graph
+    asyncio.run(
+        orchestrate(
+            user_input=user_input,
+            thread_id=THREAD_ID
+        )
+    )
+
+    # Reload history
+    checkpoints = asyncio.run(
+        get_last_n_checkpoints(THREAD_ID, n=6)
+    )
+
+    st.session_state.chat_history = extract_messages(checkpoints)
+    st.session_state.mcp_logs = extract_mcp_logs(checkpoints)
+
+    st.rerun()
+
+
 
 
 
