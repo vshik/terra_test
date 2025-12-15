@@ -348,10 +348,24 @@ User text:
 
 ----
 
+import asyncio
+import streamlit as st
+
 from langgraph.checkpoint.sqlite import AsyncSQLiteSaver
+from langchain_core.messages import HumanMessage, AIMessage
 
-checkpointer = AsyncSQLiteSaver("checkpoints.db")
+# ======================
+# CONFIG
+# ======================
+DB_PATH = "checkpoints.db"
+THREAD_ID = "usr123"
+N_HISTORY = 6
 
+checkpointer = AsyncSQLiteSaver(DB_PATH)
+
+# ======================
+# CHECKPOINT HELPERS
+# ======================
 async def get_last_n_checkpoints(thread_id: str, n: int = 6):
     checkpoints = []
     async for ckpt in checkpointer.list(thread_id):
@@ -377,65 +391,66 @@ def extract_mcp_logs(checkpoints):
     return logs
 
 
-import asyncio
-import streamlit as st
+# ======================
+# PLACEHOLDER ORCHESTRATOR
+# Replace with your real one
+# ======================
+async def orchestrate(user_input: str, thread_id: str):
+    # Example only — your LangGraph app.ainvoke() goes here
+    pass
 
-from checkpoint_utils import (
-    get_last_n_checkpoints,
-    extract_messages,
-    extract_mcp_logs,
-)
 
+# ======================
+# STREAMLIT APP
+# ======================
+st.set_page_config(page_title="LangGraph Chat", layout="wide")
+st.title("LangGraph + SQLite Checkpoints")
 
-THREAD_ID = st.session_state.get("thread_id", "usr123")
-
-if "chat_history" not in st.session_state:
+# ----------------------
+# Load history once
+# ----------------------
+if "history_loaded" not in st.session_state:
     checkpoints = asyncio.run(
-        get_last_n_checkpoints(THREAD_ID, n=6)
+        get_last_n_checkpoints(THREAD_ID, N_HISTORY)
     )
-
-    st.session_state.chat_history = extract_messages(checkpoints)
+    st.session_state.messages = extract_messages(checkpoints)
     st.session_state.mcp_logs = extract_mcp_logs(checkpoints)
+    st.session_state.history_loaded = True
 
+# ----------------------
+# Sidebar: MCP logs
+# ----------------------
+with st.sidebar:
+    st.subheader("MCP Logs")
+    for log in st.session_state.get("mcp_logs", []):
+        st.code(log)
 
-from langchain_core.messages import HumanMessage, AIMessage
-
-for msg in st.session_state.chat_history:
+# ----------------------
+# Chat history
+# ----------------------
+for msg in st.session_state.get("messages", []):
     if isinstance(msg, HumanMessage):
         st.chat_message("user").write(msg.content)
     elif isinstance(msg, AIMessage):
         st.chat_message("assistant").write(msg.content)
 
-
-with st.sidebar:
-    st.subheader("MCP Logs")
-    for log in st.session_state.mcp_logs:
-        st.code(log)
-
-
+# ----------------------
+# User input
+# ----------------------
 if user_input := st.chat_input("Ask something"):
     st.chat_message("user").write(user_input)
 
-    # Run graph
+    # Run LangGraph
     asyncio.run(
-        orchestrate(
-            user_input=user_input,
-            thread_id=THREAD_ID
-        )
+        orchestrate(user_input=user_input, thread_id=THREAD_ID)
     )
 
-    # Reload history
+    # Reload checkpoints after run
     checkpoints = asyncio.run(
-        get_last_n_checkpoints(THREAD_ID, n=6)
+        get_last_n_checkpoints(THREAD_ID, N_HISTORY)
     )
 
-    st.session_state.chat_history = extract_messages(checkpoints)
+    st.session_state.messages = extract_messages(checkpoints)
     st.session_state.mcp_logs = extract_mcp_logs(checkpoints)
 
     st.rerun()
-
-
-
-
-
-
