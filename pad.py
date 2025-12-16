@@ -454,3 +454,75 @@ if user_input := st.chat_input("Ask something"):
     st.session_state.mcp_logs = extract_mcp_logs(checkpoints)
 
     st.rerun()
+
+
+
+
+
+
+from langgraph.checkpoint.sqlite import AsyncSQLiteSaver
+
+DB_PATH = "checkpoints.db"
+checkpointer = AsyncSQLiteSaver(DB_PATH)
+
+
+async def get_last_n_checkpoints(thread_id: str, n: int = 5):
+    checkpoints = []
+    async for ckpt in checkpointer.list(thread_id):
+        checkpoints.append(ckpt)
+    return checkpoints[-n:]
+
+
+async def get_checkpoint_by_id(thread_id: str, checkpoint_id: str):
+    async for config, checkpoint, metadata in checkpointer.list(thread_id):
+        if config["configurable"].get("checkpoint_id") == checkpoint_id:
+            return checkpoint
+    return None
+
+
+
+@app.get("/checkpoints", response_class=HTMLResponse)
+async def list_checkpoints():
+    checkpoints = await get_last_n_checkpoints(THREAD_ID, n=5)
+
+    if not checkpoints:
+        return "<h3>No checkpoints found</h3>"
+
+    items = []
+    for config, checkpoint, _ in reversed(checkpoints):
+        ckpt_id = config["configurable"]["checkpoint_id"]
+        ts = checkpoint.get("ts")
+        workflow = checkpoint.get("route", {}).get("workflow", "unknown")
+
+        items.append(
+            f"""
+            <li>
+              <a href="/checkpoints/{ckpt_id}">
+                {workflow} @ {ts}
+              </a>
+            </li>
+            """
+        )
+
+    html = f"""
+    <html>
+      <body>
+        <h2>Last 5 Checkpoints</h2>
+        <ul>
+          {''.join(items)}
+        </ul>
+      </body>
+    </html>
+    """
+
+    return html
+
+
+@app.get("/checkpoints/{checkpoint_id}")
+async def checkpoint_detail(checkpoint_id: str):
+    checkpoint = await get_checkpoint_by_id(THREAD_ID, checkpoint_id)
+
+    if not checkpoint:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+
+    return JSONResponse(checkpoint)
