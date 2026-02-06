@@ -526,3 +526,89 @@ async def checkpoint_detail(checkpoint_id: str):
         raise HTTPException(status_code=404, detail="Checkpoint not found")
 
     return JSONResponse(checkpoint)
+
+
+
+import os
+import hcl2
+import json
+from sentence_transformers import SentenceTransformer, util
+
+# 1. Load the Semantic Model (Lightweight and fast for technical text)
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def extract_terraform_variables(root_dir):
+    """Walks through a directory to extract variable names and descriptions."""
+    var_library = []
+    for root, _, files in os.walk(root_dir):
+        for file in files:
+            if file.endswith(".tf"):
+                with open(os.path.join(root, file), 'r') as f:
+                    try:
+                        data = hcl2.load(f)
+                        if 'variable' in data:
+                            for var_block in data['variable']:
+                                for name, attr in var_block.items():
+                                    description = attr.get('description', [''])[0]
+                                    # Create a rich text 'document' for the variable
+                                    context = f"Variable: {name}. Description: {description}"
+                                    var_library.append({
+                                        "name": name,
+                                        "context": context,
+                                        "file": file
+                                    })
+                    except Exception as e:
+                        print(f"Error parsing {file}: {e}")
+    return var_library
+
+def find_best_match(recommendation, var_library):
+    """Matches a Turbonomic recommendation to the most similar TF variable."""
+    # Convert library contexts to embeddings
+    library_texts = [item['context'] for item in var_library]
+    library_embeddings = model.encode(library_texts, convert_to_tensor=True)
+
+    # Convert the Turbonomic recommendation into a searchable query
+    # We include the entity name and the recommended action
+    query = f"Target variable for {recommendation['entity_name']} to resize to {recommendation['new_value']}"
+    query_embedding = model.encode(query, convert_to_tensor=True)
+
+    # Compute cosine similarity
+    cosine_scores = util.cos_sim(query_embedding, library_embeddings)[0]
+    
+    # Get the index of the highest score
+    best_match_idx = cosine_scores.argmax().item()
+    confidence = cosine_scores[best_match_idx].item()
+    
+    return var_library[best_match_idx], confidence
+
+# --- EXECUTION ---
+
+# Mock Turbonomic Data (This would normally come from an API or CSV)
+turbo_json = {
+    "entity_name": "payment-processor-vm",
+    "current_value": "Standard_D2s_v3",
+    "new_value": "Standard_B2s",
+    "resource_group": "production-rg"
+}
+
+# Path to your Terraform repositories
+tf_dir = "./my-terraform-repo"
+
+print("Scanning Terraform files...")
+vars_found = extract_terraform_variables(tf_dir)
+
+if not vars_found:
+    print("No variables found in the directory.")
+else:
+    print(f"Found {len(vars_found)} variables. Finding best match...")
+    match, score = find_best_match(turbo_json, vars_found)
+
+    print("-" * 30)
+    print(f"TURBONOMIC ENTITY: {turbo_json['entity_name']}")
+    print(f"RECOMMENDED MATCH: {match['name']}")
+    print(f"CONFIDENCE SCORE:  {score:.4f}")
+    print(f"SOURCE FILE:      {match['file']}")
+    print("-" * 30)
+
+    if score < 0.75:
+        print("WARNING: Low confidence. Manual verification recommended.")
