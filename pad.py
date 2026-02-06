@@ -612,3 +612,14 @@ else:
 
     if score < 0.75:
         print("WARNING: Low confidence. Manual verification recommended.")
+
+import ssl
+import os
+
+# This tells Python to ignore SSL certificate errors for this execution
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
