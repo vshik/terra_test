@@ -626,94 +626,97 @@ else:
 
 
 
-
 import json
 from difflib import SequenceMatcher
 
-# 1. Input Data
-terraform_analysis = {
-    "sizing_variables": [
-        {"id": "db-edition", "category": "sku_tier", "environment": "dev", "value": "Standard", "resource_group": "dige-azuresql-eastus2-dev-rg"},
-        {"id": "db-max-size-gb", "category": "disk_size", "environment": "dev", "value": 250, "resource_group": "dige-azuresql-eastus2-dev-rg"},
-        {"id": "db-min-capacity", "category": "scaling", "environment": "dev", "value": 3, "resource_group": "dige-azuresql-eastus2-dev-rg"},
-        {"id": "max-capacity", "category": "scaling", "environment": "dev", "value": 50, "resource_group": "dige-azuresql-eastus2-dev-rg"},
-        {"id": "max-size-gb", "category": "disk_size", "environment": "dev", "value": 50, "resource_group": "dige-azuresql-eastus2-dev-rg"},
-        {"id": "db-max-size-gb", "category": "disk_size", "environment": "prod", "value": 250, "resource_group": "dige-azuresql-eastus2-prod-rg"}
-        # ... (other items from your JSON)
-    ]
-}
-
-finops_data = [
-    {
-        "environment_name": "dev", 
-        "resource_group_name": "dige-azuresql-eastus2-dev-rg", 
-        "resource_name": "dhp-pisp-sqldb-plat-profile", 
-        "variable_name": "dbSizeGB", 
-        "variable_description": "The size of disk in GB",
-        "variable_value_old": 250,
-        "variable_value_new": 1000
-    },
-    {
-        "environment_name": "prod", 
-        "resource_group_name": "dige-azuresql-eastus2-prod-rg", 
-        "resource_name": "dhp-pisp-sqldb-plat-profile", 
-        "variable_name": "dbSizeGB", 
-        "variable_description": "The size of disk in GB",
-        "variable_value_old": 250,
-        "variable_value_new": 5000
-    }
-]
-
 def get_similarity(a, b):
-    """Calculates text similarity ratio."""
+    """Calculates text similarity ratio between two strings."""
+    if not a or not b:
+        return 0.0
     return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
 
-def find_best_matches(terraform_json, finops_list):
-    matches = []
-    tf_vars = terraform_json.get("sizing_variables", [])
+def load_json_file(file_path):
+    """Safely loads a JSON file."""
+    try:
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Error: File '{file_path}' not found.")
+        return None
+    except json.JSONDecodeError:
+        print(f"Error: Failed to decode JSON from '{file_path}'.")
+        return None
 
-    for finops in finops_list:
+def match_files(terraform_file, finops_file, output_file="matched_results.json"):
+    # Load the data
+    tf_data = load_json_file(terraform_file)
+    finops_data = load_json_file(finops_file)
+
+    if tf_data is None or finops_data is None:
+        return
+
+    sizing_vars = tf_data.get("sizing_variables", [])
+    results = []
+
+    print(f"Processing {len(finops_data)} FinOps items against {len(sizing_vars)} Terraform variables...")
+
+    for finops in finops_data:
         best_match = None
         highest_score = -1
 
-        for tf in tf_vars:
-            # 1. Exact Environment/Resource Group filters (Contextual matching)
-            # This ensures we don't match a 'dev' finops item to a 'prod' terraform item
-            env_score = 1.0 if tf.get("environment") == finops.get("environment_name") else 0.0
-            rg_score = get_similarity(tf.get("resource_group"), finops.get("resource_group_name"))
-
-            # 2. Semantic/Text Matching (Requested mappings)
-            # id -> variable_name
+        for tf in sizing_vars:
+            # 1. Environment Filter (Highest Importance)
+            # Validates that we are looking at the right stack (dev/prod/qa)
+            env_match = 1.0 if tf.get("environment") == finops.get("environment_name") else 0.0
+            
+            # 2. Semantic Match: id -> variable_name
             name_score = get_similarity(tf.get("id"), finops.get("variable_name"))
             
-            # category -> variable_description
+            # 3. Semantic Match: category -> variable_description
             desc_score = get_similarity(tf.get("category"), finops.get("variable_description"))
             
-            # value -> variable_value_old
+            # 4. Value Match: value -> variable_value_old
+            # We convert to string to handle both int and float comparisons
             val_match = 1.0 if str(tf.get("value")) == str(finops.get("variable_value_old")) else 0.0
 
-            # 3. Weighted Total Score
-            # Environment and Resource Group are high priority to ensure correct resource targeting
-            total_score = (env_score * 0.4) + (rg_score * 0.2) + (name_score * 0.2) + (desc_score * 0.1) + (val_match * 0.1)
+            # Weighted Scoring Calculation
+            # Weighting: Env(40%), Name Similarity(30%), Description(20%), Old Value(10%)
+            total_score = (env_match * 0.4) + (name_score * 0.3) + (desc_score * 0.2) + (val_match * 0.1)
 
             if total_score > highest_score:
                 highest_score = total_score
                 best_match = tf
 
-        matches.append({
-            "finops_variable": finops["variable_name"],
-            "matched_terraform_id": best_match["id"] if best_match else "No Match",
-            "terraform_path": best_match.get("terraform_path", "N/A") if best_match else "N/A",
-            "confidence_score": round(highest_score, 4)
-        })
+        # Append the successful match
+        if best_match:
+            results.append({
+                "finops_input": {
+                    "variable": finops.get("variable_name"),
+                    "env": finops.get("environment_name")
+                },
+                "terraform_match": {
+                    "id": best_match.get("id"),
+                    "path": best_match.get("terraform_path"),
+                    "current_value": best_match.get("value")
+                },
+                "confidence": round(highest_score, 4)
+            })
+
+    # Save results to a file
+    with open(output_file, 'w') as f:
+        json.dump(results, f, indent=2)
     
-    return matches
+    # Print summary table to console
+    print(f"\n{'FinOps Var':<15} | {'Match ID':<15} | {'Score':<8} | {'Terraform Path'}")
+    print("-" * 100)
+    for res in results:
+        print(f"{res['finops_input']['variable']:<15} | "
+              f"{res['terraform_match']['id']:<15} | "
+              f"{res['confidence']:<8} | "
+              f"{res['terraform_match']['path']}")
 
-# Execute Matching
-results = find_best_matches(terraform_analysis, finops_data)
+    print(f"\nFull matching report saved to: {output_file}")
 
-# Print Results
-print(f"{'FinOps Var':<15} | {'Terraform ID':<15} | {'Score':<8} | {'Path'}")
-print("-" * 80)
-for res in results:
-    print(f"{res['finops_variable']:<15} | {res['matched_terraform_id']:<15} | {res['confidence_score']:<8} | {res['terraform_path']}")
+if __name__ == "__main__":
+    # Specify your file names here
+    match_files("terraform_analysis.json", "finops_data.json")
