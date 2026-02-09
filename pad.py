@@ -758,7 +758,7 @@ def match_finops_to_terraform(tf_file, finops_file, output_file="matched_results
         highest_score = -1
 
         for tf in sizing_vars:
-            # 1. Context Match (Environment) - High Weight
+            # 1. Context Match (Environment)
             env_match = 1.0 if tf.get("environment") == finops.get("environment_name") else 0.0
             
             # 2. Semantic Match: id (TF) -> variable_name (FinOps)
@@ -770,41 +770,44 @@ def match_finops_to_terraform(tf_file, finops_file, output_file="matched_results
             # 4. Value Match: value (TF) -> variable_value_old (FinOps)
             val_match = 1.0 if str(tf.get("value")) == str(finops.get("variable_value_old")) else 0.0
 
-            # Weighting: Env(40%), Name(30%), Desc(20%), Value(10%)
+            # Weighting Logic
             total_score = (env_match * 0.4) + (name_score * 0.3) + (desc_score * 0.2) + (val_match * 0.1)
 
             if total_score > highest_score:
                 highest_score = total_score
                 best_match = tf
 
-        # (1) Only include if match score > 0.7
+        # Only include if match score strictly > 0.7
         if best_match and highest_score > THRESHOLD:
             matched_results.append({
-                "finops_variable_name": finops.get("variable_name"),
+                "finops_resource_group": finops.get("resource_group_name"),
+                "finops_resource_name": finops.get("resource_name"),
+                "finops_variable": finops.get("variable_name"),
                 "terraform_id": best_match.get("id"),
-                "resource_group_name": best_match.get("resource_group"),
-                "resource_name": best_match.get("service"),
                 "variable_value_old": best_match.get("value"),
                 "variable_value_new": finops.get("variable_value_new"),
                 "confidence": round(highest_score, 4)
             })
 
-    # Save mapping to file
+    # Save to file
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(matched_results, f, indent=2)
 
-    # (2) Enhanced Print Output
-    header = f"{'FinOps Var':<15} | {'TF ID':<15} | {'Resource':<18} | {'Old':<6} | {'New':<6} | {'Score'}"
+    # Output with FinOps-sourced resource details
+    header = f"{'RG (FinOps)':<35} | {'Resource (FinOps)':<30} | {'Var Name':<12} | {'Old':<6} | {'New':<6} | {'Score'}"
     print(header)
     print("-" * len(header))
     
     for res in matched_results:
-        print(f"{str(res['finops_variable_name']):<15} | "
-              f"{str(res['terraform_id']):<15} | "
-              f"{str(res['resource_name']):<18} | "
+        print(f"{str(res['finops_resource_group']):<35} | "
+              f"{str(res['finops_resource_name']):<30} | "
+              f"{str(res['finops_variable']):<12} | "
               f"{str(res['variable_value_old']):<6} | "
               f"{str(res['variable_value_new']):<6} | "
               f"{res['confidence']}")
+
+if __name__ == "__main__":
+    match_finops_to_terraform("terraform_analysis.json", "finops_data.json")
 
 if __name__ == "__main__":
     match_finops_to_terraform("terraform_analysis.json", "finops_data.json")
