@@ -720,3 +720,88 @@ def match_files(terraform_file, finops_file, output_file="matched_results.json")
 if __name__ == "__main__":
     # Specify your file names here
     match_files("terraform_analysis.json", "finops_data.json")
+
+
+
+
+
+import json
+from difflib import SequenceMatcher
+
+def get_similarity(a, b):
+    """Calculates text similarity ratio between two strings."""
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
+
+def load_json_file(file_path):
+    """Safely loads a JSON file."""
+    try:
+        with open(file_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading {file_path}: {e}")
+        return None
+
+def match_finops_to_terraform(tf_file, finops_file, output_file="matched_results.json"):
+    tf_data = load_json_file(tf_file)
+    finops_data = load_json_file(finops_file)
+
+    if tf_data is None or finops_data is None:
+        return
+
+    sizing_vars = tf_data.get("sizing_variables", [])
+    matched_results = []
+    THRESHOLD = 0.7
+
+    for finops in finops_data:
+        best_match = None
+        highest_score = -1
+
+        for tf in sizing_vars:
+            # 1. Context Match (Environment)
+            env_match = 1.0 if tf.get("environment") == finops.get("environment_name") else 0.0
+            
+            # 2. Semantic Match: id -> variable_name
+            name_score = get_similarity(tf.get("id"), finops.get("variable_name"))
+            
+            # 3. Semantic Match: category -> variable_description
+            desc_score = get_similarity(tf.get("category"), finops.get("variable_description"))
+            
+            # 4. Value Match: value -> variable_value_old
+            val_match = 1.0 if str(tf.get("value")) == str(finops.get("variable_value_old")) else 0.0
+
+            # Weighted Score (Env: 40%, Name: 30%, Desc: 20%, Val: 10%)
+            total_score = (env_match * 0.4) + (name_score * 0.3) + (desc_score * 0.2) + (val_match * 0.1)
+
+            if total_score > highest_score:
+                highest_score = total_score
+                best_match = tf
+
+        # (1) Only consider if match score > 0.7
+        if best_match and highest_score >= THRESHOLD:
+            matched_results.append({
+                "resource_group_name": best_match.get("resource_group"),
+                "resource_name": best_match.get("service"),
+                "variable_name": finops.get("variable_name"),
+                "variable_value_old": best_match.get("value"), # Value from Terraform
+                "variable_value_new": finops.get("variable_value_new"), # Recommendation from FinOps
+                "confidence": round(highest_score, 4)
+            })
+
+    # Save to file
+    with open(output_file, 'w') as f:
+        json.dump(matched_results, f, indent=2)
+
+    # (2) Print results with specific columns
+    print(f"{'RG Name':<30} | {'Resource':<20} | {'Old Val':<8} | {'New Val':<8} | {'Score'}")
+    print("-" * 85)
+    for res in matched_results:
+        print(f"{str(res['resource_group_name']):<30} | "
+              f"{str(res['resource_name']):<20} | "
+              f"{str(res['variable_value_old']):<8} | "
+              f"{str(res['variable_value_new']):<8} | "
+              f"{res['confidence']}")
+
+if __name__ == "__main__":
+    match_finops_to_terraform("terraform_analysis.json", "finops_data.json")
