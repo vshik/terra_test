@@ -623,3 +623,97 @@ except AttributeError:
     pass
 else:
     ssl._create_default_https_context = _create_unverified_https_context
+
+
+
+
+import json
+from difflib import SequenceMatcher
+
+# 1. Input Data
+terraform_analysis = {
+    "sizing_variables": [
+        {"id": "db-edition", "category": "sku_tier", "environment": "dev", "value": "Standard", "resource_group": "dige-azuresql-eastus2-dev-rg"},
+        {"id": "db-max-size-gb", "category": "disk_size", "environment": "dev", "value": 250, "resource_group": "dige-azuresql-eastus2-dev-rg"},
+        {"id": "db-min-capacity", "category": "scaling", "environment": "dev", "value": 3, "resource_group": "dige-azuresql-eastus2-dev-rg"},
+        {"id": "max-capacity", "category": "scaling", "environment": "dev", "value": 50, "resource_group": "dige-azuresql-eastus2-dev-rg"},
+        {"id": "max-size-gb", "category": "disk_size", "environment": "dev", "value": 50, "resource_group": "dige-azuresql-eastus2-dev-rg"},
+        {"id": "db-max-size-gb", "category": "disk_size", "environment": "prod", "value": 250, "resource_group": "dige-azuresql-eastus2-prod-rg"}
+        # ... (other items from your JSON)
+    ]
+}
+
+finops_data = [
+    {
+        "environment_name": "dev", 
+        "resource_group_name": "dige-azuresql-eastus2-dev-rg", 
+        "resource_name": "dhp-pisp-sqldb-plat-profile", 
+        "variable_name": "dbSizeGB", 
+        "variable_description": "The size of disk in GB",
+        "variable_value_old": 250,
+        "variable_value_new": 1000
+    },
+    {
+        "environment_name": "prod", 
+        "resource_group_name": "dige-azuresql-eastus2-prod-rg", 
+        "resource_name": "dhp-pisp-sqldb-plat-profile", 
+        "variable_name": "dbSizeGB", 
+        "variable_description": "The size of disk in GB",
+        "variable_value_old": 250,
+        "variable_value_new": 5000
+    }
+]
+
+def get_similarity(a, b):
+    """Calculates text similarity ratio."""
+    return SequenceMatcher(None, str(a).lower(), str(b).lower()).ratio()
+
+def find_best_matches(terraform_json, finops_list):
+    matches = []
+    tf_vars = terraform_json.get("sizing_variables", [])
+
+    for finops in finops_list:
+        best_match = None
+        highest_score = -1
+
+        for tf in tf_vars:
+            # 1. Exact Environment/Resource Group filters (Contextual matching)
+            # This ensures we don't match a 'dev' finops item to a 'prod' terraform item
+            env_score = 1.0 if tf.get("environment") == finops.get("environment_name") else 0.0
+            rg_score = get_similarity(tf.get("resource_group"), finops.get("resource_group_name"))
+
+            # 2. Semantic/Text Matching (Requested mappings)
+            # id -> variable_name
+            name_score = get_similarity(tf.get("id"), finops.get("variable_name"))
+            
+            # category -> variable_description
+            desc_score = get_similarity(tf.get("category"), finops.get("variable_description"))
+            
+            # value -> variable_value_old
+            val_match = 1.0 if str(tf.get("value")) == str(finops.get("variable_value_old")) else 0.0
+
+            # 3. Weighted Total Score
+            # Environment and Resource Group are high priority to ensure correct resource targeting
+            total_score = (env_score * 0.4) + (rg_score * 0.2) + (name_score * 0.2) + (desc_score * 0.1) + (val_match * 0.1)
+
+            if total_score > highest_score:
+                highest_score = total_score
+                best_match = tf
+
+        matches.append({
+            "finops_variable": finops["variable_name"],
+            "matched_terraform_id": best_match["id"] if best_match else "No Match",
+            "terraform_path": best_match.get("terraform_path", "N/A") if best_match else "N/A",
+            "confidence_score": round(highest_score, 4)
+        })
+    
+    return matches
+
+# Execute Matching
+results = find_best_matches(terraform_analysis, finops_data)
+
+# Print Results
+print(f"{'FinOps Var':<15} | {'Terraform ID':<15} | {'Score':<8} | {'Path'}")
+print("-" * 80)
+for res in results:
+    print(f"{res['finops_variable']:<15} | {res['matched_terraform_id']:<15} | {res['confidence_score']:<8} | {res['terraform_path']}")
