@@ -724,7 +724,6 @@ if __name__ == "__main__":
 
 
 
-
 import json
 from difflib import SequenceMatcher
 
@@ -737,7 +736,7 @@ def get_similarity(a, b):
 def load_json_file(file_path):
     """Safely loads a JSON file."""
     try:
-        with open(file_path, 'r') as f:
+        with open(file_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception as e:
         print(f"Error loading {file_path}: {e}")
@@ -759,48 +758,52 @@ def match_finops_to_terraform(tf_file, finops_file, output_file="matched_results
         highest_score = -1
 
         for tf in sizing_vars:
-            # 1. Context Match (Environment)
+            # 1. Context Match (Environment) - High Weight
             env_match = 1.0 if tf.get("environment") == finops.get("environment_name") else 0.0
             
-            # 2. Semantic Match: id -> variable_name
+            # 2. Semantic Match: id (TF) -> variable_name (FinOps)
             name_score = get_similarity(tf.get("id"), finops.get("variable_name"))
             
-            # 3. Semantic Match: category -> variable_description
+            # 3. Semantic Match: category (TF) -> variable_description (FinOps)
             desc_score = get_similarity(tf.get("category"), finops.get("variable_description"))
             
-            # 4. Value Match: value -> variable_value_old
+            # 4. Value Match: value (TF) -> variable_value_old (FinOps)
             val_match = 1.0 if str(tf.get("value")) == str(finops.get("variable_value_old")) else 0.0
 
-            # Weighted Score (Env: 40%, Name: 30%, Desc: 20%, Val: 10%)
+            # Weighting: Env(40%), Name(30%), Desc(20%), Value(10%)
             total_score = (env_match * 0.4) + (name_score * 0.3) + (desc_score * 0.2) + (val_match * 0.1)
 
             if total_score > highest_score:
                 highest_score = total_score
                 best_match = tf
 
-        # (1) Only consider if match score > 0.7
-        if best_match and highest_score >= THRESHOLD:
+        # (1) Only include if match score > 0.7
+        if best_match and highest_score > THRESHOLD:
             matched_results.append({
+                "finops_variable_name": finops.get("variable_name"),
+                "terraform_id": best_match.get("id"),
                 "resource_group_name": best_match.get("resource_group"),
                 "resource_name": best_match.get("service"),
-                "variable_name": finops.get("variable_name"),
-                "variable_value_old": best_match.get("value"), # Value from Terraform
-                "variable_value_new": finops.get("variable_value_new"), # Recommendation from FinOps
+                "variable_value_old": best_match.get("value"),
+                "variable_value_new": finops.get("variable_value_new"),
                 "confidence": round(highest_score, 4)
             })
 
-    # Save to file
-    with open(output_file, 'w') as f:
+    # Save mapping to file
+    with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(matched_results, f, indent=2)
 
-    # (2) Print results with specific columns
-    print(f"{'RG Name':<30} | {'Resource':<20} | {'Old Val':<8} | {'New Val':<8} | {'Score'}")
-    print("-" * 85)
+    # (2) Enhanced Print Output
+    header = f"{'FinOps Var':<15} | {'TF ID':<15} | {'Resource':<18} | {'Old':<6} | {'New':<6} | {'Score'}"
+    print(header)
+    print("-" * len(header))
+    
     for res in matched_results:
-        print(f"{str(res['resource_group_name']):<30} | "
-              f"{str(res['resource_name']):<20} | "
-              f"{str(res['variable_value_old']):<8} | "
-              f"{str(res['variable_value_new']):<8} | "
+        print(f"{str(res['finops_variable_name']):<15} | "
+              f"{str(res['terraform_id']):<15} | "
+              f"{str(res['resource_name']):<18} | "
+              f"{str(res['variable_value_old']):<6} | "
+              f"{str(res['variable_value_new']):<6} | "
               f"{res['confidence']}")
 
 if __name__ == "__main__":
