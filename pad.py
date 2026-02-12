@@ -811,3 +811,587 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     match_finops_to_terraform("terraform_analysis.json", "finops_data.json")
+
+
+
+
+# Turbonomic to Terraform Mapping Guide for Azure Resources
+
+## Overview
+This document maps Turbonomic's standardized recommendation fields to Terraform resource attributes and common variable naming patterns for Azure resources.
+
+---
+
+## Virtual Machines (VMs)
+
+### Resource Types
+- `azurerm_virtual_machine`
+- `azurerm_linux_virtual_machine`
+- `azurerm_windows_virtual_machine`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended VM size | `vm_size` / `size` | `vm_size`, `usr_vm_size`, `instance_type`, `sku` | Standard_D2s_v3, Standard_E4s_v5 |
+| `instanceType_before` | Current VM size | `vm_size` / `size` | (current value) | Standard_D4s_v3 |
+| `vCPU_after` | Recommended vCPUs | (derived from vm_size) | N/A (informational) | 2, 4, 8 |
+| `vMem_after` | Recommended memory (GB) | (derived from vm_size) | N/A (informational) | 8, 16, 32 |
+| `numVMs` | Current VM count | `count` / `instances` | `vm_count`, `usr_vm_count`, `instance_count` | 1, 3, 5 |
+
+### Terraform Example
+```hcl
+resource "azurerm_linux_virtual_machine" "app" {
+  name                = "app-vm-${count.index}"
+  count               = var.usr_vm_count           # Maps to: numVMs
+  size                = var.usr_vm_size            # Maps to: instanceType_after
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  # ... other config
+}
+```
+
+---
+
+## Virtual Machine Scale Sets (VMSS)
+
+### Resource Type
+- `azurerm_virtual_machine_scale_set`
+- `azurerm_linux_virtual_machine_scale_set`
+- `azurerm_windows_virtual_machine_scale_set`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended VM size | `sku` / `vm_size` | `vmss_sku`, `usr_vmss_size`, `sku_name` | Standard_D2s_v3 |
+| `instanceCount_after` | Recommended instance count | `instances` / `capacity` | `vmss_capacity`, `usr_instance_count`, `min_instances`, `max_instances` | 3, 10, 20 |
+| `storageAmount_after` | Recommended storage (GB) | `storage_profile_os_disk.disk_size_gb` | `os_disk_size`, `usr_disk_size_gb` | 128, 256, 512 |
+
+### Terraform Example
+```hcl
+resource "azurerm_linux_virtual_machine_scale_set" "web" {
+  name                = "web-vmss"
+  sku                 = var.usr_vmss_size         # Maps to: instanceType_after
+  instances           = var.usr_instance_count    # Maps to: instanceCount_after
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  # ... other config
+}
+```
+
+---
+
+## Azure SQL Database
+
+### Resource Types
+- `azurerm_mssql_database`
+- `azurerm_sql_database`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended SKU/tier | `sku_name` | `db_sku`, `usr_db_sku`, `database_sku`, `sku_name` | S0, S1, P1, GP_Gen5_2 |
+| `storageAmount_after` | Recommended storage (GB) | `max_size_gb` | `max_size_gb`, `usr_db_storage`, `storage_gb` | 10, 50, 250, 500 |
+| `vCPU_after` | Recommended vCores | (part of sku_name) | N/A (embedded in SKU) | 2, 4, 8 (in GP_Gen5_2) |
+| `DTU_after` | Recommended DTUs | (part of sku_name) | N/A (embedded in SKU) | 10, 20, 50 (in S0, S1, S2) |
+
+### SKU Name Formats
+- **DTU-based**: `S0`, `S1`, `S2`, `P1`, `P2`, `P4`
+- **vCore-based**: `GP_Gen5_2`, `BC_Gen5_4`, `HS_Gen5_8`
+
+### Terraform Example
+```hcl
+resource "azurerm_mssql_database" "main" {
+  name        = "main-db"
+  server_id   = azurerm_mssql_server.main.id
+  sku_name    = var.usr_db_sku              # Maps to: instanceType_after
+  max_size_gb = var.usr_db_storage          # Maps to: storageAmount_after
+  # ... other config
+}
+```
+
+---
+
+## Azure Database for PostgreSQL / MySQL
+
+### Resource Types
+- `azurerm_postgresql_server`
+- `azurerm_postgresql_flexible_server`
+- `azurerm_mysql_server`
+- `azurerm_mysql_flexible_server`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended SKU | `sku_name` | `db_sku`, `usr_postgres_sku`, `sku_name` | B_Gen5_1, GP_Gen5_2, MO_Gen5_4 |
+| `storageAmount_after` | Recommended storage (MB) | `storage_mb` | `storage_mb`, `usr_db_storage_mb` | 5120, 10240, 102400 |
+| `vCPU_after` | Recommended vCores | (part of sku_name) | N/A | 1, 2, 4, 8 |
+| `backup_retention_days` | Backup retention | `backup_retention_days` | `backup_retention`, `usr_backup_days` | 7, 14, 35 |
+
+### Terraform Example
+```hcl
+resource "azurerm_postgresql_flexible_server" "main" {
+  name                = "postgres-server"
+  sku_name            = var.usr_postgres_sku        # Maps to: instanceType_after
+  storage_mb          = var.usr_db_storage_mb       # Maps to: storageAmount_after
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  # ... other config
+}
+```
+
+---
+
+## Azure Kubernetes Service (AKS)
+
+### Resource Type
+- `azurerm_kubernetes_cluster`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended node VM size | `default_node_pool.vm_size` | `node_vm_size`, `usr_aks_node_size`, `agent_vm_size` | Standard_D2s_v3, Standard_D4s_v3 |
+| `instanceCount_after` | Recommended node count | `default_node_pool.node_count` / `min_count` / `max_count` | `node_count`, `usr_node_count`, `min_nodes`, `max_nodes` | 3, 5, 10 |
+| `storageAmount_after` | OS disk size (GB) | `default_node_pool.os_disk_size_gb` | `os_disk_size_gb`, `usr_disk_size` | 100, 128, 256 |
+
+### Terraform Example
+```hcl
+resource "azurerm_kubernetes_cluster" "main" {
+  name                = "aks-cluster"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  dns_prefix          = "aks"
+  
+  default_node_pool {
+    name                = "default"
+    vm_size             = var.usr_aks_node_size    # Maps to: instanceType_after
+    node_count          = var.usr_node_count       # Maps to: instanceCount_after
+    enable_auto_scaling = true
+    min_count           = var.usr_min_nodes
+    max_count           = var.usr_max_nodes
+    os_disk_size_gb     = var.usr_disk_size        # Maps to: storageAmount_after
+  }
+  # ... other config
+}
+```
+
+---
+
+## Azure App Service / Web Apps
+
+### Resource Types
+- `azurerm_app_service`
+- `azurerm_linux_web_app`
+- `azurerm_windows_web_app`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended App Service Plan SKU | `azurerm_app_service_plan.sku.tier` + `sku.size` | `app_service_sku`, `usr_plan_sku`, `sku_tier`, `sku_size` | B1, S1, P1v2, P2v3 |
+| `instanceCount_after` | Recommended instance count | `azurerm_app_service_plan.sku.capacity` | `instance_capacity`, `usr_app_instances` | 1, 2, 3 |
+
+### App Service Plan SKU Format
+- **Tier + Size**: `Basic` (B1, B2), `Standard` (S1, S2, S3), `Premium` (P1v2, P2v2, P3v2), `PremiumV3` (P1v3, P2v3)
+
+### Terraform Example
+```hcl
+resource "azurerm_service_plan" "main" {
+  name                = "app-service-plan"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  os_type             = "Linux"
+  sku_name            = var.usr_plan_sku           # Maps to: instanceType_after
+  worker_count        = var.usr_app_instances      # Maps to: instanceCount_after
+}
+
+resource "azurerm_linux_web_app" "main" {
+  name                = "web-app"
+  service_plan_id     = azurerm_service_plan.main.id
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  # ... other config
+}
+```
+
+---
+
+## Azure Container Instances (ACI)
+
+### Resource Type
+- `azurerm_container_group`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `vCPU_after` | Recommended CPU cores | `container.cpu` | `container_cpu`, `usr_cpu_cores` | 0.5, 1, 2, 4 |
+| `vMem_after` | Recommended memory (GB) | `container.memory` | `container_memory`, `usr_memory_gb` | 0.5, 1, 2, 4 |
+| `instanceCount_after` | Container replicas | Count of containers in group | `container_count`, `usr_container_count` | 1, 2, 3 |
+
+### Terraform Example
+```hcl
+resource "azurerm_container_group" "main" {
+  name                = "aci-group"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  os_type             = "Linux"
+  
+  container {
+    name   = "app"
+    image  = "nginx:latest"
+    cpu    = var.usr_cpu_cores         # Maps to: vCPU_after
+    memory = var.usr_memory_gb         # Maps to: vMem_after
+  }
+  # ... other config
+}
+```
+
+---
+
+## Azure Storage Accounts
+
+### Resource Type
+- `azurerm_storage_account`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended account tier/replication | `account_tier` + `account_replication_type` | `storage_tier`, `usr_storage_tier`, `replication_type` | Standard_LRS, Premium_ZRS |
+| `storageAmount_after` | Used/recommended capacity | (informational only) | N/A | 100GB, 1TB |
+| `performance_tier` | Performance tier | `account_tier` | `storage_account_tier`, `usr_tier` | Standard, Premium |
+
+### Account Types
+- **Tier**: `Standard`, `Premium`
+- **Replication**: `LRS`, `GRS`, `RAGRS`, `ZRS`, `GZRS`, `RAGZRS`
+
+### Terraform Example
+```hcl
+resource "azurerm_storage_account" "main" {
+  name                     = "storageaccount"
+  resource_group_name      = var.resource_group_name
+  location                 = var.location
+  account_tier             = var.usr_storage_tier        # Maps to: instanceType_after (tier part)
+  account_replication_type = var.usr_replication_type    # Maps to: instanceType_after (replication part)
+  # ... other config
+}
+```
+
+---
+
+## Azure Managed Disks
+
+### Resource Type
+- `azurerm_managed_disk`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended disk type | `storage_account_type` | `disk_type`, `usr_disk_sku`, `disk_sku` | Standard_LRS, Premium_SSD, StandardSSD_ZRS |
+| `storageAmount_after` | Recommended disk size (GB) | `disk_size_gb` | `disk_size_gb`, `usr_disk_size` | 32, 64, 128, 256, 512, 1024 |
+| `diskIOPS_after` | Recommended IOPS | (derived from disk type/size) | N/A | 500, 2300, 5000 |
+| `throughput_after` | Recommended throughput (MB/s) | (derived from disk type/size) | N/A | 60, 150, 200 |
+
+### Disk Types
+- `Standard_LRS`, `StandardSSD_LRS`, `StandardSSD_ZRS`
+- `Premium_LRS`, `Premium_ZRS`
+- `PremiumV2_LRS`, `UltraSSD_LRS`
+
+### Terraform Example
+```hcl
+resource "azurerm_managed_disk" "data" {
+  name                 = "data-disk"
+  resource_group_name  = var.resource_group_name
+  location             = var.location
+  storage_account_type = var.usr_disk_sku         # Maps to: instanceType_after
+  disk_size_gb         = var.usr_disk_size        # Maps to: storageAmount_after
+  create_option        = "Empty"
+  # ... other config
+}
+```
+
+---
+
+## Azure Redis Cache
+
+### Resource Type
+- `azurerm_redis_cache`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Recommended SKU (family + capacity) | `family` + `capacity` | `redis_sku`, `usr_redis_capacity`, `sku_name` | C0, C1, P1, P2 |
+| `vMem_after` | Cache memory (GB) | (derived from capacity) | N/A | 0.25, 1, 6, 13 |
+| `sku_tier` | SKU tier | `sku_name` | `redis_tier`, `usr_cache_tier` | Basic, Standard, Premium |
+
+### Redis SKU Format
+- **Basic/Standard**: C0-C6 (250MB - 53GB)
+- **Premium**: P1-P5 (6GB - 120GB)
+
+### Terraform Example
+```hcl
+resource "azurerm_redis_cache" "main" {
+  name                = "redis-cache"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku_name            = var.usr_cache_tier        # Maps to: sku_tier (Basic/Standard/Premium)
+  family              = var.usr_redis_family      # Maps to: instanceType_after (C or P)
+  capacity            = var.usr_redis_capacity    # Maps to: instanceType_after (0-6 or 1-5)
+  # ... other config
+}
+```
+
+---
+
+## Azure Cosmos DB
+
+### Resource Type
+- `azurerm_cosmosdb_account`
+- `azurerm_cosmosdb_sql_database`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `throughput_after` | Recommended RU/s | `throughput` | `cosmos_throughput`, `usr_ru_per_second`, `throughput` | 400, 1000, 4000, 10000 |
+| `storageAmount_after` | Storage size (GB) | (informational/autoscale) | N/A | 10, 100, 1000 |
+| `autoscale_max_throughput` | Max autoscale RU/s | `autoscale_settings.max_throughput` | `max_throughput`, `usr_max_rus` | 1000, 4000, 10000 |
+
+### Terraform Example
+```hcl
+resource "azurerm_cosmosdb_sql_database" "main" {
+  name                = "cosmos-db"
+  resource_group_name = azurerm_cosmosdb_account.main.resource_group_name
+  account_name        = azurerm_cosmosdb_account.main.name
+  throughput          = var.usr_ru_per_second     # Maps to: throughput_after
+  
+  # OR for autoscale:
+  # autoscale_settings {
+  #   max_throughput = var.usr_max_rus            # Maps to: autoscale_max_throughput
+  # }
+}
+```
+
+---
+
+## Azure Load Balancer
+
+### Resource Type
+- `azurerm_lb`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | SKU type | `sku` | `lb_sku`, `usr_lb_sku` | Basic, Standard, Gateway |
+| `sku_tier` | SKU tier | `sku_tier` | `lb_tier`, `usr_lb_tier` | Regional, Global |
+
+### Terraform Example
+```hcl
+resource "azurerm_lb" "main" {
+  name                = "load-balancer"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  sku                 = var.usr_lb_sku           # Maps to: instanceType_after
+  sku_tier            = var.usr_lb_tier          # Maps to: sku_tier
+  # ... other config
+}
+```
+
+---
+
+## Azure Application Gateway
+
+### Resource Type
+- `azurerm_application_gateway`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | SKU name/tier | `sku.name` + `sku.tier` | `appgw_sku`, `usr_gateway_sku` | Standard_Small, WAF_Medium, Standard_v2 |
+| `instanceCount_after` | Instance capacity | `sku.capacity` / `autoscale_configuration` | `gateway_capacity`, `usr_appgw_capacity`, `min_capacity`, `max_capacity` | 2, 3, 10 |
+
+### Application Gateway SKUs
+- **V1**: Standard_Small, Standard_Medium, Standard_Large, WAF_Medium, WAF_Large
+- **V2**: Standard_v2, WAF_v2
+
+### Terraform Example
+```hcl
+resource "azurerm_application_gateway" "main" {
+  name                = "app-gateway"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  
+  sku {
+    name     = var.usr_gateway_sku         # Maps to: instanceType_after
+    tier     = var.usr_gateway_tier
+    capacity = var.usr_appgw_capacity      # Maps to: instanceCount_after
+  }
+  
+  # OR for autoscaling (v2 only):
+  # autoscale_configuration {
+  #   min_capacity = var.usr_min_capacity
+  #   max_capacity = var.usr_max_capacity
+  # }
+  # ... other config
+}
+```
+
+---
+
+## Azure Functions
+
+### Resource Types
+- `azurerm_function_app`
+- `azurerm_linux_function_app`
+- `azurerm_windows_function_app`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | App Service Plan SKU | `service_plan_id` (references plan SKU) | `function_sku`, `usr_function_plan_sku` | Y1, EP1, EP2, P1v2, P2v2 |
+| `instanceCount_after` | Pre-warmed instances | `app_settings["WEBSITE_MAX_DYNAMIC_APPLICATION_SCALE_OUT"]` | `max_scale_out`, `usr_max_instances` | 10, 20, 100 |
+
+### Function Plan Types
+- **Consumption**: Y1 (dynamic scaling)
+- **Premium**: EP1, EP2, EP3 (pre-warmed instances)
+- **Dedicated**: Same as App Service (B1, S1, P1v2, etc.)
+
+### Terraform Example
+```hcl
+resource "azurerm_service_plan" "functions" {
+  name                = "functions-plan"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  os_type             = "Linux"
+  sku_name            = var.usr_function_plan_sku    # Maps to: instanceType_after
+}
+
+resource "azurerm_linux_function_app" "main" {
+  name                = "function-app"
+  service_plan_id     = azurerm_service_plan.functions.id
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  
+  app_settings = {
+    "WEBSITE_MAX_DYNAMIC_APPLICATION_SCALE_OUT" = var.usr_max_instances  # Maps to: instanceCount_after
+  }
+  # ... other config
+}
+```
+
+---
+
+## Azure Virtual Network Gateway (VPN Gateway)
+
+### Resource Type
+- `azurerm_virtual_network_gateway`
+
+| Turbonomic Field | Description | Terraform Attribute | Common Variable Names | Example Values |
+|-----------------|-------------|---------------------|----------------------|----------------|
+| `instanceType_after` | Gateway SKU | `sku` | `vpn_sku`, `usr_gateway_sku` | Basic, VpnGw1, VpnGw2, VpnGw3 |
+| `vpn_type` | VPN type | `vpn_type` | `vpn_type`, `usr_vpn_type` | RouteBased, PolicyBased |
+
+### VPN Gateway SKUs
+- **Basic**: Basic (legacy)
+- **Generation 1**: VpnGw1, VpnGw2, VpnGw3
+- **Generation 2**: VpnGw2, VpnGw3, VpnGw4, VpnGw5
+
+### Terraform Example
+```hcl
+resource "azurerm_virtual_network_gateway" "main" {
+  name                = "vpn-gateway"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+  type                = "Vpn"
+  vpn_type            = var.usr_vpn_type         # Maps to: vpn_type
+  sku                 = var.usr_gateway_sku      # Maps to: instanceType_after
+  # ... other config
+}
+```
+
+---
+
+## Summary Table: Common Field Mappings Across Resources
+
+| Turbonomic Field | Typical Terraform Attributes | Purpose |
+|-----------------|----------------------------|---------|
+| `instanceType_after` | `size`, `sku`, `sku_name`, `vm_size`, `family` + `capacity` | Size/SKU recommendation |
+| `instanceType_before` | (current value of above) | Current size/SKU |
+| `instanceCount_after` | `count`, `instances`, `capacity`, `node_count`, `worker_count` | Scaling recommendation |
+| `vCPU_after` | (derived from size/sku) | CPU cores (informational) |
+| `vMem_after` | (derived from size/sku) or `memory` | Memory in GB (informational) |
+| `storageAmount_after` | `disk_size_gb`, `max_size_gb`, `storage_mb`, `os_disk_size_gb` | Storage size recommendation |
+| `throughput_after` | `throughput` (Cosmos DB), derived from disk type | RU/s or MB/s recommendation |
+| `diskIOPS_after` | (derived from disk type/size) | IOPS recommendation |
+
+---
+
+## Best Practices for Mapping
+
+### 1. **Use Terraform State as Source of Truth**
+```bash
+# List all resources
+terraform state list
+
+# Show specific resource details
+terraform state show azurerm_linux_virtual_machine.app
+
+# Export state to JSON for parsing
+terraform show -json > terraform-state.json
+```
+
+### 2. **Tag Resources for Easy Identification**
+```hcl
+resource "azurerm_linux_virtual_machine" "app" {
+  name = "app-vm"
+  # ... other config
+  
+  tags = {
+    turbonomic_id    = "vm-12345"           # Turbonomic entity ID
+    terraform_var    = "usr_vm_size"        # Variable controlling size
+    cost_center      = "engineering"
+    managed_by       = "terraform"
+  }
+}
+```
+
+### 3. **Create a Variables Mapping File**
+Create a `turbonomic-mapping.yaml` in your repo:
+```yaml
+resources:
+  - turbonomic_id: "vm-12345"
+    resource_type: "azurerm_linux_virtual_machine"
+    resource_name: "azurerm_linux_virtual_machine.app"
+    mappings:
+      instanceType_after: "var.usr_vm_size"
+      storageAmount_after: "var.usr_os_disk_size"
+    
+  - turbonomic_id: "db-67890"
+    resource_type: "azurerm_mssql_database"
+    resource_name: "azurerm_mssql_database.main"
+    mappings:
+      instanceType_after: "var.usr_db_sku"
+      storageAmount_after: "var.usr_db_storage"
+```
+
+### 4. **Automate with Scripts**
+Use the Turbonomic API to export recommendations and match them to Terraform:
+```bash
+# Export Turbonomic recommendations
+curl -X GET "https://turbonomic-instance/api/v3/markets/Market/actions" \
+  -H "Authorization: Bearer $TOKEN" > recommendations.json
+
+# Parse and match to Terraform variables
+python3 map-recommendations.py
+```
+
+### 5. **Version Control Your Mappings**
+Keep mapping documentation in your Terraform repository alongside your code so teams can reference it during reviews and updates.
+
+---
+
+## Additional Resources
+
+- **Turbonomic API Documentation**: Use the Actions API to programmatically retrieve recommendations
+- **Terraform State**: `terraform state` commands help identify current resource configurations
+- **Azure Resource SKUs**: Reference [Azure VM sizes](https://learn.microsoft.com/azure/virtual-machines/sizes) and other SKU documentation
+- **Automation**: Consider CI/CD integration to automatically create PRs with Turbonomic recommendations
+
+---
+
+## Notes
+
+1. **Custom Variable Names**: Your organization may use different variable naming conventions. This guide shows common patterns but adjust based on your standards.
+
+2. **Resource Addressing**: Turbonomic uses Azure Resource IDs; cross-reference these with `terraform state` output.
+
+3. **SKU Formats**: Azure SKU naming varies by service. Always verify the exact format in Azure documentation.
+
+4. **Autoscaling**: For autoscale-enabled resources, map to `min_count`/`max_count` rather than fixed `count`.
+
+5. **Multi-Region**: If deploying across regions, ensure mappings account for region-specific SKU availability.
+
+
+
