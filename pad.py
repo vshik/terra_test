@@ -1394,4 +1394,558 @@ Keep mapping documentation in your Terraform repository alongside your code so t
 5. **Multi-Region**: If deploying across regions, ensure mappings account for region-specific SKU availability.
 
 
+=======================
+
+
+
+"""
+Main orchestrator.
+Uses langchain, langgraph and LLMto orchestrate the whole workflow in one process.
+
+Currently under construction
+Old version of code that must be replaced
+"""
+
+# import traceback
+from pathlib import Path
+import traceback
+from langgraph.graph import StateGraph, END
+from langgraph.graph import add_messages
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.postgres import PostgresSaver
+from typing import Any, Dict, List, Union, Optional
+from uuid import uuid4
+from pydantic import BaseModel, Field
+
+from astra_azure_openai_client import AsyncAzureOpenAIClient
+from workflows.rightsize_graph import build_rightsize_graph, RightSizeState
+from utils import (
+    serialize_result,
+    safe_parse_llm_output,
+    extract_emails_from_cmdb_metadata,
+    extract_finops_data_from_toolresult,
+    notify_stakeholders,
+)
+from config import APP_CFG
+from chatbot_logger import logger
+from astra_mcp_utils import call_mcp_tool, McpFastAPIClient, list_mcp_tools
+from db_utils import save_workflow_state, load_workflow_state, del_workflow_state
+from database import get_app_db
+
+# Set CONSTANTS and variables
+MCP_TOOLS_URL = APP_CFG.MCP_TOOLS_URL
+MCP_SERVER_URL = APP_CFG.MCP_SERVER_URL
+MCP_AGENT_URL = APP_CFG.MCP_AGENT_URL
+MCP_AGENT_PORT = APP_CFG.MCP_AGENT_PORT
+CLONE_DIR = Path(APP_CFG.CLONE_DIR)
+ANALYSIS_OUT_DIR = Path(APP_CFG.ANALYSIS_OUT_DIR)
+
+# Async Azure OpenAI client  # TODO: improve config so only AZ part is used here
+llm_client = AsyncAzureOpenAIClient(az_cfg=APP_CFG)
+
+
+# Langgraph setup - state definition, implement nodes
+class OrchestratorState(BaseModel):
+    """Orchestration state"""
+
+    user_input: str
+    session_id: Optional[str] = None
+    route: dict = None
+    messages: list = []
+    mcp_logs: list = []
+    final_answer: Any | None = None
+    user_id: Optional[str] = None  # TODO: make this mandatory later
+    branch: Optional[str] = None
+    rightsize_graph: Any = None  # Pre-built workflow graph
+
+
+# Implement workflow - update_rightsize_workflow
+async def run_update_rightsize_workflow(
+    # repo_url: str, env: str, app_id: str="APP0002202", branch: str="main"
+    repo_url: str,
+    env: str,
+    app_id: str,
+    user_id: str,
+    session_id: str = None,
+    branch: str = "main",
+    graph=None,  # Pre-built graph from FastAPI app.state
+) -> RightSizeState:
+    """
+    Run the Astra MCP Agent workflow for updating rightsize.
+
+    Args:
+        repo_url (str): The repository URL.
+        env (str): The environment name.
+        app_id (str): The application ID.
+        session_id (str): The session ID for concurrent workflow execution.
+        branch (str): The git branch name.
+
+    Returns:
+        RightSizeState: The final state after workflow execution.
+    May be create and add to state feature branch name already now
+    """
+    params = {
+        "repo_url": repo_url,
+        "environment": env,
+        "app_id": app_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "branch": branch,
+        "local_base_dir": CLONE_DIR,
+        "aanalysis_base_dir": ANALYSIS_OUT_DIR,
+    }
+    logger.debug(f"Starting workflow with parameters: {params}")
+
+    # Validate that graph is provided (should be from FastAPI app.state)
+    if graph is None:
+        raise ValueError(
+            "Workflow graph not provided. "
+            "Graph must be initialized at FastAPI startup via lifespan context manager."
+        )
+
+    # acquire app_db session
+    app_db = next(get_app_db())
+
+    # Use pre-built graph from FastAPI app.state (no need to build here)
+    update_rightsize_workflow_graph = graph
+    logger.debug("Using pre-built workflow graph from FastAPI app.state")
+
+    # Initialize the state object separately
+    try:
+        initial_state = RightSizeState(**params)
+        await save_workflow_state(
+            user_id=user_id, session_id=session_id, state=initial_state, app_db=app_db
+        )
+        logger.debug("Workflow state initialized and saved to DB.")
+    except Exception as e:
+        logger.error(f"Failed to initialize state: {e}\n{traceback.format_exc()}")
+        raise
+
+    # Invoke the graph with the state at runtime
+    try:
+        logger.debug(f"About to invoke workflow graph with: {initial_state = }")
+        # Bug fix: Add config with thread_id for LangGraph checkpointing
+        config = {"configurable": {"thread_id": session_id or "default_session"}}
+        logger.debug(f"Invoking workflow with checkpoint config: {config}")
+        result_state = await update_rightsize_workflow_graph.ainvoke(
+            initial_state, config=config
+        )
+
+        # Convert dict result to RightSizeState object
+        # LangGraph ainvoke returns dict, not Pydantic model
+        result_state_obj = RightSizeState(**result_state)
+
+        # Save updated state to WorkflowStateTable (includes HITL pause state)
+        # This allows HITL endpoints to find the session and check hitl_pending flag
+        await save_workflow_state(
+            user_id=user_id,
+            session_id=session_id,
+            state=result_state_obj,
+            app_db=app_db,
+        )
+        logger.debug(
+            f"Workflow state saved after execution (hitl_pending={result_state_obj.hitl_pending})"
+        )
+    except Exception as e:
+        logger.error(f"Workflow execution failed: {e}\n{traceback.format_exc()}")
+        raise
+
+    return result_state_obj
+
+
+def route_node(state: OrchestratorState):
+    """Node to route the workflow based on the user input."""
+    return state.route["workflow"]
+
+
+async def general_question_node(state: OrchestratorState):
+    """Node to answer general questions."""
+    answer = state.route["answer"]
+    new_messages = state.messages + [{"role": "assistant", "content": answer}]
+    return {"final_answer": answer, "messages": new_messages}
+
+
+async def single_tool_node(state: OrchestratorState):
+    """Node to call a single tool."""
+    tool = state.route["tool"]
+    params = state.route["params"]
+    logger.debug(f"Inside single_tool_node...Input....: {tool = }, {params = }")
+    result = await call_mcp_tool(MCP_SERVER_URL, tool, params)
+
+    new_mcp_logs = state.mcp_logs + [
+        {"tool": tool, "params": params, "status": "Success"}
+    ]
+    new_messages = state.messages + [
+        {
+            "role": "assistant",
+            "content": (
+                f"Tool `{tool}` executed with params {params}. Result:\n{result}"
+            ),
+        },
+    ]
+    # , {"role": "user", "content": result}]
+
+    logger.debug(f"Inside single_tool_node...Result...: {result}")
+
+    return {"final_answer": result, "mcp_logs": new_mcp_logs, "messages": new_messages}
+
+
+async def workflow_node(state: OrchestratorState):
+    """Node to orchestrate main Astra workflow.
+
+    Handles two entry scenarios:
+      1. Direct invocation - route["params"] already has repo_url, appid, environment.
+      2. Chained from greeting_node - params may be empty; prompt user for required details.
+    """
+    if state.route.get("workflow") != "update_rightsize_repo":
+        return {"final_answer": "Unsupported workflow"}
+    logger.debug(f"Inside workflow_node. OrchestratorState: {state = }")
+
+    params = state.route.get("params", {})
+
+    # Validate required parameters - prompt user if missing (e.g. chained from greeting)
+    if not params.get("repo_url") or not params.get("appid"):
+        prompt_msg = (
+            "To start the rightsizing workflow I need a few details:\n\n"
+            "- **Repository URL** (e.g. https://github.com/org/repo)\n"
+            "- **App ID** (e.g. APP0002202)\n"
+            "- **Environment** (e.g. dev, qa, prod)\n\n"
+            "Please provide these and I will kick off the workflow right away."
+        )
+        logger.info("Required params missing - prompting user for repo_url / appid")
+        return {
+            "final_answer": prompt_msg,
+            "messages": state.messages + [{"role": "assistant", "content": prompt_msg}],
+        }
+
+    repo_url = params["repo_url"]
+    app_id = params["appid"]
+
+    # Check if environment is provided, if not, prompt user
+    if "environment" not in params:
+        prompt_msg = (
+            f"Please specify the target environment for this rightsizing operation.\n\n"
+            f"App ID: {app_id}\n"
+            f"Repository: {repo_url}\n\n"
+            f"Which environment would you like to update? (e.g., dev, qa, prod)"
+        )
+        logger.info("Environment not specified - prompting user")
+        return {"final_answer": prompt_msg}
+
+    env = params["environment"]
+    session_id = state.session_id or "s001"
+    user_id = state.user_id
+    branch = state.branch or "main"
+
+    # Get pre-built workflow graph from state (passed down from FastAPI app)
+    graph = state.rightsize_graph
+    logger.debug(f"workflow_node: Retrieved graph from state: {graph}")
+
+    if graph is None:
+        raise ValueError(
+            "Workflow graph not initialized. "
+            "Check FastAPI lifespan startup logs for checkpointer initialization errors."
+        )
+
+    result = await run_update_rightsize_workflow(
+        repo_url=repo_url,
+        env=env,
+        app_id=app_id,
+        user_id=user_id,
+        session_id=session_id,
+        branch=branch,
+        graph=graph,  # Pass pre-built graph
+    )
+
+    # Create user-friendly message instead of dumping full state
+    # Extract progress messages from workflow execution
+    progress_messages = []
+    if result.messages:
+        # Filter for assistant messages (progress updates from workflow nodes)
+        for msg in result.messages:
+            if isinstance(msg, dict):
+                if msg.get("type") == "ai" or msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if content and not content.startswith("⏸"):  # Skip pause messages
+                        progress_messages.append(content)
+
+    if result.hitl_checkpoint:
+        # Workflow paused at HITL checkpoint
+        checkpoint_name = result.hitl_checkpoint
+        friendly_message = f"⏸ **Workflow Paused - Approval Required**\n\n"
+
+        # Add progress summary
+        if progress_messages:
+            friendly_message += "**Progress:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += f"**Checkpoint:** {checkpoint_name}\n\n"
+
+        if checkpoint_name == "finops_validation":
+            rec_count = len(result.recommendations) if result.recommendations else 0
+            friendly_message += (
+                f"📊 **Status:** Fetched {rec_count} rightsizing recommendation(s) from FinOps\n"
+                f"👉 **Next Step:** Review and approve/reject using natural language in a chat."
+            )
+        elif checkpoint_name == "analysis_approval":
+            var_count = (
+                result.analysis_output.get("sizing_variables_count", 0)
+                if result.analysis_output
+                else 0
+            )
+            friendly_message += (
+                f"📋 **Status:** Analyzed Terraform infrastructure - found {var_count} sizing variable(s)\n\n"
+                f"👉 **Next Step:** Review and approve/reject using natural language in a chat."
+            )
+        elif checkpoint_name == "commit_approval":
+            files_modified = (
+                len(result.hitl_data.get("files_modified", []))
+                if result.hitl_data
+                else 0
+            )
+            friendly_message += (
+                f"📋 **Status:** Infrastructure updates ready for commit\n"
+                f"📄 Modified {files_modified} file(s)\n"
+                f"🌿 Branch: {result.feature_branch}\n\n"
+                f"👉 **Next Step:** Review and approve/reject using natural language in a chat."
+            )
+
+        final_answer = friendly_message
+    elif result.error:
+        # Workflow failed
+        friendly_message = "❌ **Workflow Failed**\n\n"
+
+        # Show progress before failure
+        if progress_messages:
+            friendly_message += "**Progress before failure:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += f"**Error:** {result.error}"
+        final_answer = friendly_message
+    elif result.pr:
+        # Workflow completed successfully
+        friendly_message = "✅ **Workflow Complete!**\n\n"
+
+        # Show all progress steps
+        if progress_messages:
+            friendly_message += "**Completed steps:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += (
+            f"**Pull Request:** {result.pr}\n"
+            f"**Branch:** {result.feature_branch}\n\n"
+            f"👉 **Next Step:** Review and merge the pull request."
+        )
+        final_answer = friendly_message
+
+    else:
+        # Workflow still running or completed without PR
+        friendly_message = f"✅ **Rightsizing Workflow Executed**\n\n"
+
+        # Show progress
+        if progress_messages:
+            friendly_message += "**Progress:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += (
+            f"**App ID:** {app_id}\n"
+            f"**Environment:** {env}\n"
+            f"**Session ID:** {session_id}\n\n"
+            f"👉 Check workflow status in the sidebar."
+        )
+        final_answer = friendly_message
+
+    new_mcp_logs = state.mcp_logs + [
+        {
+            "tool": "update_rightsize_workflow",
+            "params": {
+                "repo_url": repo_url,
+                "environment": env,
+                "app_id": app_id,
+                "session_id": session_id,
+            },
+            "status": "Success",
+        }
+    ]
+    new_messages = state.messages + [{"role": "assistant", "content": final_answer}]
+
+    return {
+        "final_answer": final_answer,
+        "mcp_logs": new_mcp_logs,
+        "messages": new_messages,
+    }
+
+
+async def none_node(state: OrchestratorState):
+    """Node to handle empty input."""
+    answer = state.route["message"]
+    new_messages = state.messages + [{"role": "assistant", "content": answer}]
+    return {"final_answer": answer, "messages": new_messages}
+
+
+# async def greeting_node(state: OrchestratorState):
+#     """Node to handle greeting input."""
+#     answer = state.route["message"]
+#     new_messages = state.messages + [{"role": "assistant", "content": answer}]
+#     return {"final_answer": answer, "messages": new_messages}
+
+
+async def greeting_node(state: OrchestratorState):
+    """Node to handle greeting input, respond with greeting, then immediately trigger workflow_node.
+
+    Flow:
+      1. Send a friendly greeting message back to the user.
+      2. Always chain into workflow_node so the conversation continues naturally
+         into the update_rightsize_repo workflow without requiring a second user message.
+    """
+    greeting_text = state.route.get("message", "Hi there! I can help you automate FinOps and Infra updates.")
+    logger.debug(f"Inside greeting_node. Sending greeting and chaining to workflow_node.")
+
+    # Append greeting to conversation history
+    new_messages = state.messages + [{"role": "assistant", "content": greeting_text}]
+
+    # Build updated state that carries the greeting in messages and routes to the workflow.
+    # Override route so workflow_node knows which workflow to run.
+    updated_route = {
+        **state.route,
+        "workflow": "update_rightsize_repo",
+        # params may be absent on a bare greeting - workflow_node will prompt for them
+        "params": state.route.get("params", {}),
+    }
+    updated_state = state.model_copy(update={
+        "messages": new_messages,
+        "final_answer": greeting_text,
+        "route": updated_route,
+    })
+
+    # Chain directly into workflow_node - natural conversation continues
+    workflow_result = await workflow_node(updated_state)
+
+    # Prepend the greeting to whatever workflow_node returned so the user sees both
+    workflow_answer = workflow_result.get("final_answer", "")
+    combined_answer = f"{greeting_text}\n\n{workflow_answer}" if workflow_answer else greeting_text
+
+    # Merge messages: greeting already in new_messages; workflow messages may overlap, use workflow's list
+    final_messages = workflow_result.get("messages", new_messages)
+
+    return {
+        "final_answer": combined_answer,
+        "messages": final_messages,
+        "mcp_logs": workflow_result.get("mcp_logs", state.mcp_logs),
+    }
+
+
+# After greeting, if workflow is requested, flow to workflow_node, else end
+def greetings_edge_selector(state: OrchestratorState):
+    if state.route.get("workflow") == "update_rightsize_repo":
+        return "update_rightsize_repo"
+    return END
+
+
+async def orchestrator(
+    user_input: str,
+    mcp_logs: list,
+    messages: list,
+    session_id: str,
+    user_id: str,
+    rightsize_graph=None,  # Pre-built graph passed from FastAPI app.state
+):
+    """
+    Main orchestrator of the Astra MCP Agent Server.
+    Organizes:
+        - different types of workflows using LangGraph router pattern
+        - external communication using /chat and /tools endpoints.
+    """
+    # Ensure session_id is not None; should fail later if not provided
+    session_id = session_id or str(uuid4())
+
+    # Ensure user_id is not None; should fail later if not provided
+    user_id = user_id or "fake_user"
+
+    # Add user's current input to messages BEFORE processing
+    # This ensures the user's message is included in the conversation history
+    messages_with_input = messages + [{"role": "user", "content": user_input}]
+
+    # Call LLM router
+    logger.debug(
+        f"In the orchestrator, calling LLM with: {user_input = }, {messages = }"
+    )
+    if user_input.lower() in ["hi", "hello", "hey"]:
+        # Route to greetings node; greeting_node will chain into workflow_node automatically.
+        # No params yet - workflow_node will prompt the user for missing details (env, repo, etc.)
+        route_decision = {
+            "workflow": "greetings",
+            "message": "Hi there! I can help you automate FinOps and Infra updates.",
+            "params": {},  # Empty params - workflow_node will ask user for them
+        }
+    else:
+        route_decision = await llm_client.ask_llm(user_input, messages)
+    # route_decision = await llm_client.ask_llm(user_input, messages)
+    # route = await llm_client.ask_llm_auto_discovery(user_input, messages)  # Uncomment for auto-discovery. TODO: fix pa
+    logger.debug(f"Route: {route_decision = }")
+
+    # Create graph state with accumulated messages (including current user input)
+    orch_state = OrchestratorState(
+        user_input=user_input,
+        session_id=session_id,
+        messages=messages_with_input,  # Include user's current message
+        mcp_logs=mcp_logs,
+        route=route_decision,
+        final_answer=None,
+        user_id=user_id,
+        rightsize_graph=rightsize_graph,  # Pass pre-built graph through state
+    )
+    logger.debug(f"Initializing with OrchestratorState: {orch_state = }")
+
+    # Build LangGraph
+    orchestrator_graph = StateGraph(OrchestratorState)
+    orchestrator_graph.add_node("router", lambda s: {"route": s.route})
+    orchestrator_graph.set_entry_point("router")
+
+    orchestrator_graph.add_edge("router", orch_state.route["workflow"])
+
+    orchestrator_graph.add_node("none", none_node)
+    orchestrator_graph.add_node("greetings", greeting_node)
+    orchestrator_graph.add_node("general_question", general_question_node)
+    orchestrator_graph.add_node("single_tool", single_tool_node)
+    orchestrator_graph.add_node("update_rightsize_repo", workflow_node)
+
+    orchestrator_graph.add_edge("none", END)
+    orchestrator_graph.add_edge("greetings", END)
+    # orchestrator_graph.add_edge("greetings", greetings_edge_selector)
+    orchestrator_graph.add_edge("general_question", END)
+    orchestrator_graph.add_edge("single_tool", END)
+    orchestrator_graph.add_edge("update_rightsize_repo", END)
+
+    logger.debug(f"Orchestrator Graph: {orchestrator_graph}")
+
+    # Compile and execute with no checkpointer
+    app = orchestrator_graph.compile()
+    logger.info("Orchestrator compiled.")
+    logger.debug(f"App: {app} will be invoked with {orch_state = }")
+    try:
+        # Bug fix: Add config with thread_id for LangGraph checkpointing
+        config = {"configurable": {"thread_id": session_id}}
+        logger.debug(f"Invoking orchestrator with checkpoint config: {config}")
+        result_state = await app.ainvoke(orch_state, config=config)
+    except Exception as e:
+        logger.error(f"Orchestrator failed: {e} {traceback.format_exc()}")
+        result_state = {"final_answer": f"Orchestrator failed: {e}"}
+    logger.debug(f"In orchestrator result State before return: {result_state}")
+    logger.info("Orchestration complete.")
+
+    return (
+        result_state["final_answer"],
+        result_state["messages"],
+        result_state["mcp_logs"],
+    )
+
 
