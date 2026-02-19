@@ -726,6 +726,7 @@ if __name__ == "__main__":
 
 
 
+
 """
 Main orchestrator.
 Uses langchain, langgraph and LLMto orchestrate the whole workflow in one process.
@@ -918,6 +919,43 @@ async def single_tool_node(state: OrchestratorState):
     return {"final_answer": result, "mcp_logs": new_mcp_logs, "messages": new_messages}
 
 
+def _extract_params_from_history(messages: list, current_params: dict) -> dict:
+    """Scan conversation history to recover params the user answered in prior turns.
+
+    When workflow_node returns early (missing param), the graph ends and the next
+    user message starts a fresh orchestration.  The LLM may not re-extract params
+    it already asked for.  This helper fills the gaps by looking back at the message
+    history for previously answered values.
+
+    Priority: current_params (from LLM route) always wins over history values,
+    so if the LLM did extract something it takes precedence.
+    """
+    recovered = {}
+
+    # Patterns we look for in assistant questions and the following user answer
+    # Each tuple: (param_key, substring that identifies the assistant question)
+    question_markers = [
+        ("repo_url",    "repository url"),
+        ("appid",       "app id"),
+        ("environment", "environment would you like"),
+    ]
+
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        content_lower = msg.get("content", "").lower()
+        for param_key, marker in question_markers:
+            if marker in content_lower:
+                # The very next user message is the answer
+                if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
+                    user_answer = messages[i + 1].get("content", "").strip()
+                    if user_answer and param_key not in recovered:
+                        recovered[param_key] = user_answer
+
+    # Merge: current_params takes priority over recovered values
+    return {**recovered, **current_params}
+
+
 async def workflow_node(state: OrchestratorState):
     """Node to orchestrate main Astra workflow.
 
@@ -930,6 +968,10 @@ async def workflow_node(state: OrchestratorState):
     logger.debug(f"Inside workflow_node. OrchestratorState: {state = }")
 
     params = state.route.get("params", {})
+
+    # Recover params the user answered in earlier turns (history-aware continuation)
+    params = _extract_params_from_history(state.messages, params)
+    logger.debug(f"workflow_node resolved params (after history merge): {params}")
 
     # Ask for one missing param at a time - keeps conversation natural
     if not params.get("repo_url"):
@@ -1277,5 +1319,3 @@ async def orchestrator(
         result_state["messages"],
         result_state["mcp_logs"],
     )
-
-
