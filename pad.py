@@ -724,9 +724,6 @@ if __name__ == "__main__":
 
 
 
-
-
-
 """
 Main orchestrator.
 Uses langchain, langgraph and LLMto orchestrate the whole workflow in one process.
@@ -786,6 +783,7 @@ class OrchestratorState(BaseModel):
     user_id: Optional[str] = None  # TODO: make this mandatory later
     branch: Optional[str] = None
     rightsize_graph: Any = None  # Pre-built workflow graph
+    param_collection_attempts: int = 0  # Tracks how many times we have asked for missing params
 
 
 # Implement workflow - update_rightsize_workflow
@@ -919,43 +917,6 @@ async def single_tool_node(state: OrchestratorState):
     return {"final_answer": result, "mcp_logs": new_mcp_logs, "messages": new_messages}
 
 
-def _extract_params_from_history(messages: list, current_params: dict) -> dict:
-    """Scan conversation history to recover params the user answered in prior turns.
-
-    When workflow_node returns early (missing param), the graph ends and the next
-    user message starts a fresh orchestration.  The LLM may not re-extract params
-    it already asked for.  This helper fills the gaps by looking back at the message
-    history for previously answered values.
-
-    Priority: current_params (from LLM route) always wins over history values,
-    so if the LLM did extract something it takes precedence.
-    """
-    recovered = {}
-
-    # Patterns we look for in assistant questions and the following user answer
-    # Each tuple: (param_key, substring that identifies the assistant question)
-    question_markers = [
-        ("repo_url",    "repository url"),
-        ("appid",       "app id"),
-        ("environment", "environment would you like"),
-    ]
-
-    for i, msg in enumerate(messages):
-        if msg.get("role") != "assistant":
-            continue
-        content_lower = msg.get("content", "").lower()
-        for param_key, marker in question_markers:
-            if marker in content_lower:
-                # The very next user message is the answer
-                if i + 1 < len(messages) and messages[i + 1].get("role") == "user":
-                    user_answer = messages[i + 1].get("content", "").strip()
-                    if user_answer and param_key not in recovered:
-                        recovered[param_key] = user_answer
-
-    # Merge: current_params takes priority over recovered values
-    return {**recovered, **current_params}
-
-
 async def workflow_node(state: OrchestratorState):
     """Node to orchestrate main Astra workflow.
 
@@ -968,40 +929,58 @@ async def workflow_node(state: OrchestratorState):
     logger.debug(f"Inside workflow_node. OrchestratorState: {state = }")
 
     params = state.route.get("params", {})
+    attempts = state.param_collection_attempts
 
-    # Recover params the user answered in earlier turns (history-aware continuation)
-    params = _extract_params_from_history(state.messages, params)
-    logger.debug(f"workflow_node resolved params (after history merge): {params}")
-
-    # Ask for one missing param at a time - keeps conversation natural
+    # Determine which required params are still missing
+    missing = []
     if not params.get("repo_url"):
-        prompt_msg = "What is the repository URL you would like to rightsize?"
-        logger.info("Prompting user for repo_url")
-        return {
-            "final_answer": prompt_msg,
-            "messages": state.messages + [{"role": "assistant", "content": prompt_msg}],
-        }
-
+        missing.append("**Repository URL** (e.g. https://github.com/org/repo)")
     if not params.get("appid"):
-        prompt_msg = "What is the App ID for this rightsizing operation? (e.g. APP0002202)"
-        logger.info("Prompting user for appid")
+        missing.append("**App ID** (e.g. APP0002202)")
+    if not params.get("environment"):
+        missing.append("**Environment** (e.g. dev, qa, prod)")
+
+    if missing:
+        if attempts == 0:
+            # First ask - request all 3 params clearly
+            prompt_msg = (
+                "To start the rightsizing workflow I need a few details:\n\n"
+                "- **Repository URL** (e.g. https://github.com/org/repo)\n"
+                "- **App ID** (e.g. APP0002202)\n"
+                "- **Environment** (e.g. dev, qa, prod)\n\n"
+                "Please provide all three and I will kick off the workflow right away."
+            )
+            logger.info("Attempt 1: prompting user for all required params")
+        elif attempts == 1:
+            # Second ask - tell user exactly what is still missing
+            missing_list = "\n".join(f"- {m}" for m in missing)
+            prompt_msg = (
+                f"I still need the following to proceed:\n\n{missing_list}\n\n"
+                "Could you please provide these?"
+            )
+            logger.info(f"Attempt 2: prompting user for still-missing params: {missing}")
+        else:
+            # Exceeded 2 attempts - give up gracefully
+            prompt_msg = (
+                "I was unable to collect the required details after two attempts. "
+                "Please restart and provide the Repository URL, App ID, and Environment "
+                "to run the rightsizing workflow."
+            )
+            logger.info("Exceeded 2 param collection attempts - aborting")
+            return {
+                "final_answer": prompt_msg,
+                "messages": state.messages + [{"role": "assistant", "content": prompt_msg}],
+                "param_collection_attempts": attempts + 1,
+            }
+
         return {
             "final_answer": prompt_msg,
             "messages": state.messages + [{"role": "assistant", "content": prompt_msg}],
+            "param_collection_attempts": attempts + 1,
         }
 
     repo_url = params["repo_url"]
     app_id = params["appid"]
-
-    # Ask for environment separately - one question at a time
-    if "environment" not in params:
-        prompt_msg = f"Which environment would you like to update for **{app_id}**? (e.g. dev, qa, prod)"
-        logger.info("Prompting user for environment")
-        return {
-            "final_answer": prompt_msg,
-            "messages": state.messages + [{"role": "assistant", "content": prompt_msg}],
-        }
-
     env = params["environment"]
     session_id = state.session_id or "s001"
     user_id = state.user_id
@@ -1156,7 +1135,7 @@ async def workflow_node(state: OrchestratorState):
 
 async def none_node(state: OrchestratorState):
     """Node to handle empty input."""
-    answer = state.route.get("message", "I didn't catch that. Could you rephrase?")
+    answer = state.route["message"]
     new_messages = state.messages + [{"role": "assistant", "content": answer}]
     return {"final_answer": answer, "messages": new_messages}
 
@@ -1196,16 +1175,14 @@ async def greeting_node(state: OrchestratorState):
         "route": updated_route,
     })
 
-    # Chain directly into workflow_node - natural conversation continues.
-    # updated_state already has new_messages (greeting appended), so workflow_node
-    # builds on top of it and will not duplicate the greeting in history.
+    # Chain directly into workflow_node - natural conversation continues
     workflow_result = await workflow_node(updated_state)
 
     # Prepend the greeting to whatever workflow_node returned so the user sees both
     workflow_answer = workflow_result.get("final_answer", "")
     combined_answer = f"{greeting_text}\n\n{workflow_answer}" if workflow_answer else greeting_text
 
-    # Use messages from workflow_result - it was built on top of new_messages (no duplicates)
+    # Merge messages: greeting already in new_messages; workflow messages may overlap, use workflow's list
     final_messages = workflow_result.get("messages", new_messages)
 
     return {
@@ -1319,3 +1296,7 @@ async def orchestrator(
         result_state["messages"],
         result_state["mcp_logs"],
     )
+
+
+
+
