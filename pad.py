@@ -1300,3 +1300,317 @@ async def orchestrator(
 
 
 
+import os
+import sys
+import asyncio
+import httpx
+import streamlit as st
+from datetime import datetime
+from dotenv import load_dotenv
+from chat_ui_logger import logger
+
+# ---- Configuration ----
+load_dotenv()
+LOCAL_DEPLOYMENT = not (len(sys.argv) > 1 and sys.argv[1] == "dev")
+CHAT_ENDPOINT = (
+    os.getenv("ASTRA_AGENT_CHAT_ENDPOINT", "http://localhost:8001/astrachatbotui/chat")
+    if LOCAL_DEPLOYMENT else
+    "https://astrachatbot-dev-eastus2.humana.com/astrachatbotui/chat"
+)
+
+agent_token = os.getenv("ASTRA_API_TOKEN")
+
+# Greeting triggers: when user sends one of these, we send a greeting call
+# immediately followed by a workflow-trigger call so conversation flows naturally.
+GREETING_TRIGGERS = {"hi", "hello", "hey", "hi!", "hello!", "hey!"}
+
+# ---- Helper Functions ----
+async def call_chat_api(
+    mode: str,
+    user_id: str,
+    agent_token: str,
+    session_id=None,
+    **kwargs
+):
+    """Call unified /chat endpoint. If session_id is None, backend will assign one."""
+    payload = {
+        "mode": mode,
+        "user_id": user_id,
+        **kwargs
+    }
+    if session_id is not None:
+        payload["session_id"] = session_id
+
+    headers = {
+        "Authorization": f"Bearer {agent_token}",
+        "Content-Type": "application/json"
+    }
+
+    async with httpx.AsyncClient(timeout=600.0, verify=False) as client:
+        response = await client.post(CHAT_ENDPOINT, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+
+def get_workflow_stage_message(prompt: str, checkpoint: str = None) -> str:
+    """Get workflow stage message based on prompt and checkpoint."""
+    if checkpoint:
+        return {
+            'finops_validation': "📊 Validating FinOps recommendations with CMDB...",
+            'analysis_approval': "🔍 Analyzing Terraform infrastructure patterns...",
+            'commit_approval': "📋 Preparing commit and pull request..."
+        }.get(checkpoint, "⏳ Processing workflow stage...")
+    prompt_lower = prompt.lower()
+    if any(kw in prompt_lower for kw in ['clone', 'repository', 'repo']):
+        return "📦 Cloning repository..."
+    if any(kw in prompt_lower for kw in ['analyze', 'analysis', 'terraform']):
+        return "🔍 Analyzing infrastructure..."
+    if any(kw in prompt_lower for kw in ['update', 'modify', 'rightsize', 'resize']):
+        return "✏️ Updating configuration..."
+    if any(kw in prompt_lower for kw in ['commit', 'push', 'pr']):
+        return "📋 Creating pull request..."
+    if any(kw in prompt_lower for kw in ['recommend', 'finops']):
+        return "💡 Fetching recommendations..."
+    return "🚀 Processing request..."
+
+
+def initialize_session_state():
+    """Initialize session state with fake values."""
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = "fake_user"  # Default username
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = None  # No session yet; backend will assign
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "show_raw_response" not in st.session_state:
+        st.session_state.show_raw_response = False
+    if "last_result" not in st.session_state:
+        st.session_state.last_result = None
+    agent_token_input = st.text_input("Enter agent token:", type="password")
+    if agent_token_input:
+        st.session_state.agent_token = agent_token_input
+    # if "agent_token" not in st.session_state:
+    #     st.session_state.agent_token = agent_token
+
+
+def _display_field_value(field, value):
+    """Helper to display a field in the sidebar"""
+    if isinstance(value, (dict, list)):
+        with st.expander(field, expanded=False):
+            st.json(value)
+    else:
+        st.write(f"**{field}:** `{value}`")
+
+
+def display_result_summary(result):
+    """Show all top-level fields except those displayed elsewhere"""
+    if not isinstance(result, dict):
+        return
+    ignore_keys = {"result", "history", "mcp_logs"}
+    fields = [k for k in result if k not in ignore_keys]
+    if not fields:
+        st.info("No extra fields in API response.")
+        return
+    for field in fields:
+        value = result[field]
+        _display_field_value(field, value)
+
+
+# ---- Page Configuration ----
+
+st.set_page_config(
+    page_title="Astra Rightsizing Workflow",
+    page_icon="🖥️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ---- Session State Initialization ----
+initialize_session_state()
+
+# ---- Sidebar ----
+
+with st.sidebar:
+    st.header("🖥️ Astra Rightsizing Workflow")
+
+    # User controls for identity and session
+    st.subheader("🔑 User & Session")
+
+    # Username entry
+    user_input = st.text_input(
+        "Username:",
+        value=st.session_state.user_id,
+        key="user_id_input"
+    )
+    if user_input and user_input != st.session_state.user_id:
+        st.session_state.user_id = user_input
+        st.success(f"Username set to: {user_input}")
+        st.rerun()
+
+    # Session entry
+    session_input = st.text_input(
+        "Session ID (optional, for existing chat):",
+        value=st.session_state.session_id or "",
+        key="session_id_input"
+    )
+    if session_input and session_input != (st.session_state.session_id or ""):
+        st.session_state.session_id = session_input
+        st.session_state.messages = []
+        st.success(f"Connected to session: {session_input}")
+        st.rerun()
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 New Session", use_container_width=True):
+            st.session_state.session_id = None
+            st.session_state.messages = []
+            st.success("A new session will start on your next message.")
+            st.rerun()
+    with col2:
+        if st.button("🗑️ Clear Chat", use_container_width=True):
+            st.session_state.messages = []
+            st.success("✅ Chat cleared")
+            st.rerun()
+
+    st.divider()
+
+    # Diagnostics
+    with st.expander("🔧 Diagnostic Tools", expanded=False):
+        st.session_state.show_raw_response = st.checkbox(
+            "Show Raw API Responses",
+            value=st.session_state.show_raw_response
+        )
+        st.caption(f"**Backend:** {CHAT_ENDPOINT}")
+        st.caption(f"**Mode:** {'Local' if LOCAL_DEPLOYMENT else 'DEV'}")
+
+    # Session summary (read-only display, if active)
+    if st.session_state.session_id:
+        st.caption(f"**Active Session:** `{st.session_state.session_id}`")
+    st.caption(f"**User:** `{st.session_state.user_id}`")
+
+    # ---- Last API Response Fields (NEW FEATURE) ----
+    if st.session_state.last_result:
+        st.divider()
+        st.subheader("🌐 Last API Response Summary")
+        display_result_summary(st.session_state.last_result)
+    else:
+        st.info("No API response yet.")
+
+# ---- Main Chat Interface ----
+
+st.title("💬 Astra Rightsizing Workflow")
+st.caption("Infrastructure optimization powered by AI")
+
+# Display conversation history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+# Chat input box
+prompt = st.chat_input("Say 'hi' to start or type correct command "
+"- e.g., 'update rightsize variables for app APP123 with repo url "
+"https://github.com/username/repo.git environment dev'")
+
+if prompt:
+    with st.chat_message("user"):
+        st.write(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # Detect if this is a greeting - if so, we make two sequential API calls:
+    #   Call 1: sends the greeting to get a friendly greeting reply from greeting_node
+    #   Call 2: immediately follows to trigger workflow_node, prompting for workflow params
+    # This makes the conversation flow naturally without the user needing to type twice.
+    is_greeting = prompt.strip().lower() in GREETING_TRIGGERS
+
+    # Call API with session_id (can be None on first call)
+    with st.chat_message("assistant"):
+        spinner_msg = get_workflow_stage_message(prompt)
+        with st.spinner(spinner_msg):
+            try:
+                # ── Call 1: send the user's message (greeting or normal) ──────────
+                result = asyncio.run(call_chat_api(
+                    mode="chat",
+                    user_id=st.session_state.user_id,
+                    agent_token=st.session_state.agent_token,
+                    session_id=st.session_state.session_id,
+                    user_input=prompt,
+                    history=st.session_state.messages[:-1],
+                    mcp_logs=[]
+                ))
+
+                reply = result.get("result", "No response received")
+                st.write(reply)
+
+                # Show raw response in diagnostic mode
+                if st.session_state.show_raw_response:
+                    with st.expander("🔍 Raw API Response (greeting)"):
+                        st.json(result)
+
+                # Update session_id from backend if it's new
+                backend_session_id = result.get("session_id")
+                if backend_session_id and st.session_state.session_id != backend_session_id:
+                    st.session_state.session_id = backend_session_id
+
+                # Update history from backend if available
+                returned_history = result.get("history", [])
+                if returned_history:
+                    st.session_state.messages = returned_history
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": reply})
+
+                # Store last result for sidebar summary
+                st.session_state.last_result = result
+
+                # ── Call 2 (greeting only): immediately trigger workflow_node ────
+                # Sends a silent follow-up so workflow_node prompts for params,
+                # making the conversation feel like one natural exchange.
+                if is_greeting:
+                    with st.spinner("🚀 Starting workflow..."):
+                        workflow_trigger = "update rightsize workflow"
+                        workflow_result = asyncio.run(call_chat_api(
+                            mode="chat",
+                            user_id=st.session_state.user_id,
+                            agent_token=st.session_state.agent_token,
+                            session_id=st.session_state.session_id,  # use updated session_id
+                            user_input=workflow_trigger,
+                            history=st.session_state.messages,  # includes greeting exchange
+                            mcp_logs=[]
+                        ))
+
+                        workflow_reply = workflow_result.get("result", "")
+                        if workflow_reply:
+                            st.write(workflow_reply)
+
+                        # Show raw response in diagnostic mode
+                        if st.session_state.show_raw_response:
+                            with st.expander("🔍 Raw API Response (workflow trigger)"):
+                                st.json(workflow_result)
+
+                        # Update session_id again if backend assigned one
+                        wf_session_id = workflow_result.get("session_id")
+                        if wf_session_id and st.session_state.session_id != wf_session_id:
+                            st.session_state.session_id = wf_session_id
+
+                        # Append workflow reply to messages
+                        wf_history = workflow_result.get("history", [])
+                        if wf_history:
+                            st.session_state.messages = wf_history
+                        elif workflow_reply:
+                            st.session_state.messages.append(
+                                {"role": "assistant", "content": workflow_reply}
+                            )
+
+                        # Store latest result for sidebar
+                        st.session_state.last_result = workflow_result
+
+                asyncio.run(asyncio.sleep(0.5))
+                st.rerun()
+
+            except Exception as e:
+                error_msg = f"❌ Unexpected error: {str(e)}"
+                st.error(error_msg)
+                st.session_state.messages.append({"role": "assistant", "content": error_msg})
+
+
+
+
