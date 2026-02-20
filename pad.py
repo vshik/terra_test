@@ -1321,8 +1321,11 @@ CHAT_ENDPOINT = (
 agent_token = os.getenv("ASTRA_API_TOKEN")
 
 # Greeting triggers: when user sends one of these, we send a greeting call
-# immediately followed by a workflow-trigger call so conversation flows naturally.
+# immediately followed by param collection so conversation flows naturally.
 GREETING_TRIGGERS = {"hi", "hello", "hey", "hi!", "hello!", "hey!"}
+
+# Workflow triggers: skip greeting entirely and jump straight into param collection.
+WORKFLOW_TRIGGERS = {"go update", "start update"}
 
 # ---- Helper Functions ----
 
@@ -1650,11 +1653,24 @@ elif prompt:
         st.write(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Detect if this is a greeting - if so, we make two sequential API calls:
-    #   Call 1: sends the greeting to get a friendly greeting reply from greeting_node
-    #   Call 2: immediately follows to trigger workflow_node, prompting for workflow params
-    # This makes the conversation flow naturally without the user needing to type twice.
+    # Detect prompt type:
+    #   is_greeting      → Call 1 gets greeting reply, then param collection starts
+    #   is_workflow_trigger → skip greeting entirely, jump straight into param collection
     is_greeting = prompt.strip().lower() in GREETING_TRIGGERS
+    is_workflow_trigger = prompt.strip().lower() in WORKFLOW_TRIGGERS
+
+    # Workflow trigger: skip greeting, go straight into param collection
+    if is_workflow_trigger:
+        st.session_state.collecting_params = True
+        st.session_state.workflow_params = {}
+        st.session_state.param_attempts = 0
+        st.session_state.pending_param = None
+        first_question = _ask_for_next_missing_param()
+        with st.chat_message("assistant"):
+            st.write(first_question)
+        st.session_state.messages.append({"role": "assistant", "content": first_question})
+        asyncio.run(asyncio.sleep(0.3))
+        st.rerun()
 
     # Call API with session_id (can be None on first call)
     with st.chat_message("assistant"):
@@ -1699,7 +1715,7 @@ elif prompt:
                 # After greeting, we enter a param-collection loop (up to 3 attempts).
                 # Each Streamlit rerun advances the loop by one param question/answer.
                 # Once all 3 params are collected, we fire the real workflow trigger.
-                if is_greeting:
+                if is_greeting and not is_workflow_trigger:
                     # Start param collection mode
                     st.session_state.collecting_params = True
                     st.session_state.workflow_params = {}
@@ -1719,6 +1735,7 @@ elif prompt:
                 error_msg = f"❌ Unexpected error: {str(e)}"
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
+
 
 
 
