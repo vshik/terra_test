@@ -1325,6 +1325,50 @@ agent_token = os.getenv("ASTRA_API_TOKEN")
 GREETING_TRIGGERS = {"hi", "hello", "hey", "hi!", "hello!", "hey!"}
 
 # ---- Helper Functions ----
+
+
+def _ask_for_next_missing_param() -> str:
+    """Return the next question to ask based on what params are still missing.
+    Returns None if all 3 params are collected.
+    """
+    params = st.session_state.workflow_params
+    if not params.get("appid"):
+        st.session_state.pending_param = "appid"
+        return "What is the **App ID** for this rightsizing operation? (e.g. APP0002202)"
+    if not params.get("repo_url"):
+        st.session_state.pending_param = "repo_url"
+        return "What is the **Repository URL**? (e.g. https://github.com/org/repo)"
+    if not params.get("environment"):
+        st.session_state.pending_param = "environment"
+        return "Which **environment** would you like to update? (e.g. dev, qa, prod)"
+    return None  # All params collected
+
+
+def _store_user_answer(user_text: str):
+    """Store the user's latest answer into workflow_params based on pending_param."""
+    pending = st.session_state.pending_param
+    if pending and user_text.strip():
+        st.session_state.workflow_params[pending] = user_text.strip()
+        st.session_state.pending_param = None
+
+
+def _build_workflow_trigger() -> str:
+    """Build the workflow trigger string from collected params."""
+    p = st.session_state.workflow_params
+    return (
+        f"update the right-size variables for appid {p['appid']} "
+        f"in repository {p['repo_url']} "
+        f"for environment {p['environment']}"
+    )
+
+
+def _reset_param_collection():
+    """Reset all param collection state."""
+    st.session_state.collecting_params = False
+    st.session_state.workflow_params = {}
+    st.session_state.param_attempts = 0
+    st.session_state.pending_param = None
+
 async def call_chat_api(
     mode: str,
     user_id: str,
@@ -1386,6 +1430,14 @@ def initialize_session_state():
         st.session_state.show_raw_response = False
     if "last_result" not in st.session_state:
         st.session_state.last_result = None
+    if "collecting_params" not in st.session_state:
+        st.session_state.collecting_params = False  # True while gathering workflow params after greeting
+    if "workflow_params" not in st.session_state:
+        st.session_state.workflow_params = {}  # Collected so far: appid, repo_url, environment
+    if "param_attempts" not in st.session_state:
+        st.session_state.param_attempts = 0  # How many collection rounds attempted
+    if "pending_param" not in st.session_state:
+        st.session_state.pending_param = None  # Which param we are currently asking for
     agent_token_input = st.text_input("Enter agent token:", type="password")
     if agent_token_input:
         st.session_state.agent_token = agent_token_input
@@ -1511,7 +1563,89 @@ prompt = st.chat_input("Say 'hi' to start or type correct command "
 "- e.g., 'update rightsize variables for app APP123 with repo url "
 "https://github.com/username/repo.git environment dev'")
 
-if prompt:
+# ── Param collection handler ─────────────────────────────────────────────────
+# When collecting_params is True, we are in a guided param-collection dialogue.
+# Each user reply is captured here, stored, and the next question is asked.
+# Once all 3 params are collected (or 3 attempts exhausted), Call 2 fires.
+MAX_PARAM_ATTEMPTS = 3
+
+if st.session_state.collecting_params and prompt:
+    # Store this answer for whatever param we were waiting on
+    _store_user_answer(prompt)
+    st.session_state.param_attempts += 1
+
+    with st.chat_message("user"):
+        st.write(prompt)
+    st.session_state.messages.append({"role": "user", "content": prompt})
+
+    # Check if all params are now collected
+    next_question = _ask_for_next_missing_param()
+
+    if next_question is None or st.session_state.param_attempts >= MAX_PARAM_ATTEMPTS:
+        # All params collected (or max attempts reached) - fire workflow
+        params = st.session_state.workflow_params
+        all_collected = all(params.get(k) for k in ("appid", "repo_url", "environment"))
+
+        if all_collected:
+            workflow_trigger = _build_workflow_trigger()
+            with st.chat_message("assistant"):
+                with st.spinner("🚀 Kicking off the rightsizing workflow..."):
+                    try:
+                        workflow_result = asyncio.run(call_chat_api(
+                            mode="chat",
+                            user_id=st.session_state.user_id,
+                            agent_token=st.session_state.agent_token,
+                            session_id=st.session_state.session_id,
+                            user_input=workflow_trigger,
+                            history=st.session_state.messages,
+                            mcp_logs=[]
+                        ))
+                        workflow_reply = workflow_result.get("result", "")
+                        if workflow_reply:
+                            st.write(workflow_reply)
+                        if st.session_state.show_raw_response:
+                            with st.expander("🔍 Raw API Response (workflow trigger)"):
+                                st.json(workflow_result)
+                        wf_session_id = workflow_result.get("session_id")
+                        if wf_session_id and st.session_state.session_id != wf_session_id:
+                            st.session_state.session_id = wf_session_id
+                        wf_history = workflow_result.get("history", [])
+                        if wf_history:
+                            st.session_state.messages = wf_history
+                        elif workflow_reply:
+                            st.session_state.messages.append(
+                                {"role": "assistant", "content": workflow_reply}
+                            )
+                        st.session_state.last_result = workflow_result
+                    except Exception as e:
+                        error_msg = f"❌ Error triggering workflow: {str(e)}"
+                        st.error(error_msg)
+                        st.session_state.messages.append(
+                            {"role": "assistant", "content": error_msg}
+                        )
+        else:
+            # Max attempts reached but still missing params - give up gracefully
+            give_up_msg = (
+                "I was unable to collect all required details after several attempts. "
+                "Please try again and provide the App ID, Repository URL, and Environment."
+            )
+            with st.chat_message("assistant"):
+                st.write(give_up_msg)
+            st.session_state.messages.append({"role": "assistant", "content": give_up_msg})
+
+        _reset_param_collection()
+        asyncio.run(asyncio.sleep(0.3))
+        st.rerun()
+
+    else:
+        # Still missing params - ask next question
+        with st.chat_message("assistant"):
+            st.write(next_question)
+        st.session_state.messages.append({"role": "assistant", "content": next_question})
+        asyncio.run(asyncio.sleep(0.3))
+        st.rerun()
+
+elif prompt:
     with st.chat_message("user"):
         st.write(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -1561,47 +1695,22 @@ if prompt:
                 # Store last result for sidebar summary
                 st.session_state.last_result = result
 
-                # ── Call 2 (greeting only): immediately trigger workflow_node ────
-                # Sends a silent follow-up so workflow_node prompts for params,
-                # making the conversation feel like one natural exchange.
+                # ── Call 2 (greeting only): collect params then trigger workflow_node ──
+                # After greeting, we enter a param-collection loop (up to 3 attempts).
+                # Each Streamlit rerun advances the loop by one param question/answer.
+                # Once all 3 params are collected, we fire the real workflow trigger.
                 if is_greeting:
-                    with st.spinner("🚀 Starting workflow..."):
-                        workflow_trigger = "update rightsize workflow"
-                        workflow_result = asyncio.run(call_chat_api(
-                            mode="chat",
-                            user_id=st.session_state.user_id,
-                            agent_token=st.session_state.agent_token,
-                            session_id=st.session_state.session_id,  # use updated session_id
-                            user_input=workflow_trigger,
-                            history=st.session_state.messages,  # includes greeting exchange
-                            mcp_logs=[]
-                        ))
-
-                        workflow_reply = workflow_result.get("result", "")
-                        if workflow_reply:
-                            st.write(workflow_reply)
-
-                        # Show raw response in diagnostic mode
-                        if st.session_state.show_raw_response:
-                            with st.expander("🔍 Raw API Response (workflow trigger)"):
-                                st.json(workflow_result)
-
-                        # Update session_id again if backend assigned one
-                        wf_session_id = workflow_result.get("session_id")
-                        if wf_session_id and st.session_state.session_id != wf_session_id:
-                            st.session_state.session_id = wf_session_id
-
-                        # Append workflow reply to messages
-                        wf_history = workflow_result.get("history", [])
-                        if wf_history:
-                            st.session_state.messages = wf_history
-                        elif workflow_reply:
-                            st.session_state.messages.append(
-                                {"role": "assistant", "content": workflow_reply}
-                            )
-
-                        # Store latest result for sidebar
-                        st.session_state.last_result = workflow_result
+                    # Start param collection mode
+                    st.session_state.collecting_params = True
+                    st.session_state.workflow_params = {}
+                    st.session_state.param_attempts = 0
+                    st.session_state.pending_param = None
+                    # Ask for the first missing param immediately
+                    first_question = _ask_for_next_missing_param()
+                    st.write(first_question)
+                    st.session_state.messages.append(
+                        {"role": "assistant", "content": first_question}
+                    )
 
                 asyncio.run(asyncio.sleep(0.5))
                 st.rerun()
@@ -1610,6 +1719,7 @@ if prompt:
                 error_msg = f"❌ Unexpected error: {str(e)}"
                 st.error(error_msg)
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
+
 
 
 
