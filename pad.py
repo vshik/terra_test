@@ -1737,6 +1737,11 @@ elif prompt:
                 st.session_state.messages.append({"role": "assistant", "content": error_msg})
 
 
+
+
+
+
+
 """
 Main orchestrator.
 Uses langchain, langgraph and LLMto orchestrate the whole workflow in one process.
@@ -1925,14 +1930,33 @@ def _is_collecting_workflow_params(messages: list) -> bool:
     return False
 
 
+def _find_current_workflow_start(messages: list) -> int:
+    """
+    Return the index of the first message that belongs to the *current* workflow
+    session — i.e. the assistant welcome message emitted right after the most
+    recent 'go app' trigger.
+
+    This prevents params from a previous, completed workflow from bleeding into
+    a fresh one when the user says "go app" again.
+    """
+    # Walk backwards to find the last assistant message that contains the
+    # workflow-start greeting marker.
+    start_marker = "welcome to **astra rightsizing workflow**"
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            if start_marker in msg.get("content", "").lower():
+                return i  # Scan only from this message onwards
+    return 0  # No boundary found — scan from the beginning
+
+
 def _extract_workflow_params_from_history(messages: list) -> dict:
     """
     Walk the conversation history to collect repo_url, app_id, and environment
-    that the user has already provided in earlier turns.
+    that the user has already provided in earlier turns of the *current* workflow.
 
-    Strategy:
-    - Look for assistant messages that ask for a param.
-    - The *next* user message after that question is the answer.
+    Only looks at messages from the most recent workflow-start boundary so that
+    params from a previously completed workflow are never reused.
     """
     params = {}
 
@@ -1940,16 +1964,20 @@ def _extract_workflow_params_from_history(messages: list) -> dict:
     ask_appid = ["app id", "appid", "application id"]
     ask_env = ["which environment", "what environment", "target environment", "specify the environment"]
 
-    for i, msg in enumerate(messages):
+    # Scope to current workflow only — ignore anything before the last "go app"
+    start_idx = _find_current_workflow_start(messages)
+    scoped_messages = messages[start_idx:]
+
+    for i, msg in enumerate(scoped_messages):
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
         content = msg.get("content", "").lower()
 
-        # Find the next user reply
+        # Find the next user reply within the scoped window
         next_user_msg = None
-        for j in range(i + 1, len(messages)):
-            if isinstance(messages[j], dict) and messages[j].get("role") == "user":
-                next_user_msg = messages[j].get("content", "").strip()
+        for j in range(i + 1, len(scoped_messages)):
+            if isinstance(scoped_messages[j], dict) and scoped_messages[j].get("role") == "user":
+                next_user_msg = scoped_messages[j].get("content", "").strip()
                 break
 
         if next_user_msg is None:
@@ -1963,6 +1991,38 @@ def _extract_workflow_params_from_history(messages: list) -> dict:
             params["environment"] = next_user_msg
 
     return params
+
+
+# ── Input validators ─────────────────────────────────────────────────────────
+
+def _validate_repo_url(value: str) -> Optional[str]:
+    """
+    Return None if valid, or an error message string if invalid.
+    A valid repo URL must start with http:// or https://.
+    """
+    stripped = value.strip()
+    if not (stripped.startswith("http://") or stripped.startswith("https://")):
+        return (
+            "⚠️ That doesn't look like a valid repository URL.\n\n"
+            "Please provide a URL that starts with `http://` or `https://` "
+            "(e.g. `https://github.com/org/repo.git`)."
+        )
+    return None
+
+
+def _validate_app_id(value: str) -> Optional[str]:
+    """
+    Return None if valid, or an error message string if invalid.
+    A valid App ID must start with 'APP' or 'APSVC' (case-insensitive).
+    """
+    stripped = value.strip().upper()
+    if not (stripped.startswith("APP") or stripped.startswith("APSVC")):
+        return (
+            "⚠️ That doesn't look like a valid App ID.\n\n"
+            "App IDs must start with `APP` or `APSVC` "
+            "(e.g. `APP0002202` or `APSVC0012`). Please try again."
+        )
+    return None
 
 
 def route_node(state: OrchestratorState):
@@ -2039,12 +2099,27 @@ async def workflow_node(state: OrchestratorState):
             "What is the **Repository URL**? (e.g. `https://github.com/org/repo.git`)"
         )
 
+    # Validate repo_url before moving on
+    repo_err = _validate_repo_url(repo_url)
+    if repo_err:
+        logger.info(f"workflow_node: invalid repo_url '{repo_url}' — re-prompting")
+        # Clear the bad value so history extractor won't reuse it next turn.
+        # We do this by returning the error as a fresh "ask repo" prompt so
+        # _extract_workflow_params_from_history will overwrite it on the next turn.
+        return _prompt(repo_err + "\n\nWhat is the **Repository URL**?")
+
     if not app_id:
         logger.info("workflow_node: app_id missing — prompting user")
         return _prompt(
             f"Got it — repo: `{repo_url}` ✅\n\n"
             "What is the **App ID**? (e.g. `APP0002202`)"
         )
+
+    # Validate app_id before moving on
+    appid_err = _validate_app_id(app_id)
+    if appid_err:
+        logger.info(f"workflow_node: invalid app_id '{app_id}' — re-prompting")
+        return _prompt(appid_err + "\n\nWhat is the **App ID**?")
 
     if not environment:
         logger.info("workflow_node: environment missing — prompting user")
@@ -2345,10 +2420,3 @@ async def orchestrator(
         result_state["messages"],
         result_state["mcp_logs"],
     )
-
-
-
-
-
-
-
