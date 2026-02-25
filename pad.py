@@ -3165,3 +3165,751 @@ async def orchestrator(
         result_state["messages"],
         result_state["mcp_logs"],
     )
+
+
+
+
+
+
+==================================
+
+
+"""
+Main orchestrator.
+Uses langchain, langgraph and LLMto orchestrate the whole workflow in one process.
+
+Currently under construction
+Old version of code that must be replaced
+"""
+
+# import traceback
+from pathlib import Path
+import traceback
+from langgraph.graph import StateGraph, END
+from langgraph.graph import add_messages
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.postgres import PostgresSaver
+from typing import Any, Dict, List, Union, Optional
+from uuid import uuid4
+from pydantic import BaseModel, Field
+
+from astra_azure_openai_client import AsyncAzureOpenAIClient
+from workflows.rightsize_graph import build_rightsize_graph, RightSizeState
+from utils import (
+    serialize_result,
+    safe_parse_llm_output,
+    extract_emails_from_cmdb_metadata,
+    extract_finops_data_from_toolresult,
+    notify_stakeholders,
+)
+from config import APP_CFG
+from chatbot_logger import logger
+from astra_mcp_utils import call_mcp_tool, McpFastAPIClient, list_mcp_tools
+from db_utils import save_workflow_state, load_workflow_state, del_workflow_state
+from database import get_app_db
+
+# Set CONSTANTS and variables
+MCP_TOOLS_URL = APP_CFG.MCP_TOOLS_URL
+MCP_SERVER_URL = APP_CFG.MCP_SERVER_URL
+MCP_AGENT_URL = APP_CFG.MCP_AGENT_URL
+MCP_AGENT_PORT = APP_CFG.MCP_AGENT_PORT
+CLONE_DIR = Path(APP_CFG.CLONE_DIR)
+ANALYSIS_OUT_DIR = Path(APP_CFG.ANALYSIS_OUT_DIR)
+
+# Async Azure OpenAI client  # TODO: improve config so only AZ part is used here
+llm_client = AsyncAzureOpenAIClient(az_cfg=APP_CFG)
+
+
+# Langgraph setup - state definition, implement nodes
+class OrchestratorState(BaseModel):
+    """Orchestration state"""
+
+    user_input: str
+    session_id: Optional[str] = None
+    route: dict = None
+    messages: list = []
+    mcp_logs: list = []
+    final_answer: Any | None = None
+    user_id: Optional[str] = None  # TODO: make this mandatory later
+    branch: Optional[str] = None
+    rightsize_graph: Any = None  # Pre-built workflow graph
+
+
+# Implement workflow - update_rightsize_workflow
+async def run_update_rightsize_workflow(
+    # repo_url: str, env: str, app_id: str="APP0002202", branch: str="main"
+    repo_url: str,
+    env: str,
+    app_id: str,
+    user_id: str,
+    session_id: str = None,
+    branch: str = "main",
+    graph=None,  # Pre-built graph from FastAPI app.state
+) -> RightSizeState:
+    """
+    Run the Astra MCP Agent workflow for updating rightsize.
+
+    Args:
+        repo_url (str): The repository URL.
+        env (str): The environment name.
+        app_id (str): The application ID.
+        session_id (str): The session ID for concurrent workflow execution.
+        branch (str): The git branch name.
+
+    Returns:
+        RightSizeState: The final state after workflow execution.
+    May be create and add to state feature branch name already now
+    """
+    params = {
+        "repo_url": repo_url,
+        "environment": env,
+        "app_id": app_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "branch": branch,
+        "local_base_dir": CLONE_DIR,
+        "aanalysis_base_dir": ANALYSIS_OUT_DIR,
+    }
+    logger.debug(f"Starting workflow with parameters: {params}")
+
+    # Validate that graph is provided (should be from FastAPI app.state)
+    if graph is None:
+        raise ValueError(
+            "Workflow graph not provided. "
+            "Graph must be initialized at FastAPI startup via lifespan context manager."
+        )
+
+    # acquire app_db session
+    app_db = next(get_app_db())
+
+    # Use pre-built graph from FastAPI app.state (no need to build here)
+    update_rightsize_workflow_graph = graph
+    logger.debug("Using pre-built workflow graph from FastAPI app.state")
+
+    # Initialize the state object separately
+    try:
+        initial_state = RightSizeState(**params)
+        await save_workflow_state(
+            user_id=user_id, session_id=session_id, state=initial_state, app_db=app_db
+        )
+        logger.debug("Workflow state initialized and saved to DB.")
+    except Exception as e:
+        logger.error(f"Failed to initialize state: {e}\n{traceback.format_exc()}")
+        raise
+
+    # Invoke the graph with the state at runtime
+    try:
+        logger.debug(f"About to invoke workflow graph with: {initial_state = }")
+        # Bug fix: Add config with thread_id for LangGraph checkpointing
+        config = {"configurable": {"thread_id": session_id or "default_session"}}
+        logger.debug(f"Invoking workflow with checkpoint config: {config}")
+        result_state = await update_rightsize_workflow_graph.ainvoke(
+            initial_state, config=config
+        )
+
+        # Convert dict result to RightSizeState object
+        # LangGraph ainvoke returns dict, not Pydantic model
+        result_state_obj = RightSizeState(**result_state)
+
+        # Save updated state to WorkflowStateTable (includes HITL pause state)
+        # This allows HITL endpoints to find the session and check hitl_pending flag
+        await save_workflow_state(
+            user_id=user_id,
+            session_id=session_id,
+            state=result_state_obj,
+            app_db=app_db,
+        )
+        logger.debug(
+            f"Workflow state saved after execution (hitl_pending={result_state_obj.hitl_pending})"
+        )
+    except Exception as e:
+        logger.error(f"Workflow execution failed: {e}\n{traceback.format_exc()}")
+        raise
+
+    return result_state_obj
+
+
+# ── Conversational workflow helpers ──────────────────────────────────────────
+
+_GO_APP_PHRASES = ["go app", "start app", "launch app", "begin app", "run app", "go astra", "start astra"]
+
+def _is_go_app_trigger(user_input: str) -> bool:
+    """Return True if the user wants to kick off the rightsizing workflow."""
+    lowered = user_input.strip().lower()
+    return any(phrase in lowered for phrase in _GO_APP_PHRASES)
+
+
+import re
+
+_RIGHTSIZE_APP_PATTERN = re.compile(
+    r"right[\-\s]?size\s+(?:app(?:_?id)?|appid)\s+([A-Za-z0-9_\-]+)",
+    re.IGNORECASE,
+)
+
+def _is_rightsize_app_trigger(user_input: str) -> bool:
+    """Return True if the user specified an app_id inline with a rightsize command.
+
+    Matches patterns like:
+        right-size app 123
+        rightsize appid APP0002202
+        right size app_id APSVC0012
+    """
+    return bool(_RIGHTSIZE_APP_PATTERN.search(user_input.strip()))
+
+
+def _extract_app_id_from_trigger(user_input: str) -> Optional[str]:
+    """Extract the app_id from a rightsize-app trigger phrase, or return None."""
+    match = _RIGHTSIZE_APP_PATTERN.search(user_input.strip())
+    return match.group(1) if match else None
+
+
+def _is_collecting_workflow_params(messages: list) -> bool:
+    """
+    Return True if a previous assistant message asked the user for
+    repo_url / app_id / environment — meaning we're mid-param-collection.
+    """
+    collection_markers = [
+        "what is the repository url",
+        "please provide the repository url",
+        "what is the app id",
+        "please provide the app id",
+        "which environment",
+        "what environment",
+        "please specify the environment",
+    ]
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            content = msg.get("content", "").lower()
+            if any(marker in content for marker in collection_markers):
+                return True
+            break  # Only look at the most recent assistant message
+    return False
+
+
+def _find_current_workflow_start(messages: list) -> int:
+    """
+    Return the index of the first message that belongs to the *current* workflow
+    session — i.e. the assistant welcome message emitted right after the most
+    recent 'go app' trigger.
+
+    This prevents params from a previous, completed workflow from bleeding into
+    a fresh one when the user says "go app" again.
+    """
+    # Walk backwards to find the last assistant message that contains the
+    # workflow-start greeting marker.
+    start_markers = [
+        "welcome to **astra rightsizing workflow**",
+        "let's rightsize app",  # marker from _is_rightsize_app_trigger greeting
+    ]
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            content = msg.get("content", "").lower()
+            if any(marker in content for marker in start_markers):
+                return i  # Scan only from this message onwards
+    return 0  # No boundary found — scan from the beginning
+
+
+def _extract_workflow_params_from_history(messages: list) -> dict:
+    """
+    Walk the conversation history to collect repo_url, app_id, and environment
+    that the user has already provided in earlier turns of the *current* workflow.
+
+    Only looks at messages from the most recent workflow-start boundary so that
+    params from a previously completed workflow are never reused.
+    """
+    params = {}
+
+    ask_repo = ["repository url", "repo url"]
+    ask_appid = ["app id", "appid", "application id"]
+    ask_env = ["which environment", "what environment", "target environment", "specify the environment"]
+
+    # Scope to current workflow only — ignore anything before the last "go app"
+    start_idx = _find_current_workflow_start(messages)
+    scoped_messages = messages[start_idx:]
+
+    # Pre-seed app_id if the workflow was started with a "rightsize app <id>" trigger
+    for msg in scoped_messages:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content = msg.get("content", "")
+            if _is_rightsize_app_trigger(content):
+                extracted = _extract_app_id_from_trigger(content)
+                if extracted:
+                    params["app_id"] = extracted
+                break
+
+    for i, msg in enumerate(scoped_messages):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", "").lower()
+
+        # Find the next user reply within the scoped window
+        next_user_msg = None
+        for j in range(i + 1, len(scoped_messages)):
+            if isinstance(scoped_messages[j], dict) and scoped_messages[j].get("role") == "user":
+                next_user_msg = scoped_messages[j].get("content", "").strip()
+                break
+
+        if next_user_msg is None:
+            continue
+
+        if any(k in content for k in ask_repo) and "repo_url" not in params:
+            params["repo_url"] = next_user_msg
+        elif any(k in content for k in ask_env) and "environment" not in params:
+            params["environment"] = next_user_msg
+        elif any(k in content for k in ask_appid) and "app_id" not in params:
+            params["app_id"] = next_user_msg
+
+    return params
+
+
+# ── Input validators ─────────────────────────────────────────────────────────
+
+def _validate_repo_url(value: str) -> Optional[str]:
+    """
+    Return None if valid, or an error message string if invalid.
+    A valid repo URL must start with http:// or https://.
+    """
+    stripped = value.strip()
+    if not (stripped.startswith("http://") or stripped.startswith("https://")):
+        return (
+            "⚠️ That doesn't look like a valid repository URL.\n\n"
+            "Please provide a URL that starts with `http://` or `https://` "
+            "(e.g. `https://github.com/org/repo.git`)."
+        )
+    return None
+
+
+def _validate_app_id(value: str) -> Optional[str]:
+    """
+    Return None if valid, or an error message string if invalid.
+    A valid App ID must start with 'APP' or 'APSVC' (case-insensitive).
+    """
+    stripped = value.strip().upper()
+    if not (stripped.startswith("APP") or stripped.startswith("APSVC")):
+        return (
+            "⚠️ That doesn't look like a valid App ID.\n\n"
+            "App IDs must start with `APP` or `APSVC` "
+            "(e.g. `APP0002202` or `APSVC0012`). Please try again."
+        )
+    return None
+
+
+def route_node(state: OrchestratorState):
+    """Node to route the workflow based on the user input."""
+    return state.route["workflow"]
+
+
+async def general_question_node(state: OrchestratorState):
+    """Node to answer general questions."""
+    answer = state.route["answer"]
+    new_messages = state.messages + [{"role": "assistant", "content": answer}]
+    return {"final_answer": answer, "messages": new_messages}
+
+
+async def single_tool_node(state: OrchestratorState):
+    """Node to call a single tool."""
+    tool = state.route["tool"]
+    params = state.route["params"]
+    logger.debug(f"Inside single_tool_node...Input....: {tool = }, {params = }")
+    result = await call_mcp_tool(MCP_SERVER_URL, tool, params)
+
+    new_mcp_logs = state.mcp_logs + [
+        {"tool": tool, "params": params, "status": "Success"}
+    ]
+    new_messages = state.messages + [
+        {
+            "role": "assistant",
+            "content": (
+                f"Tool `{tool}` executed with params {params}. Result:\n{result}"
+            ),
+        },
+    ]
+    # , {"role": "user", "content": result}]
+
+    logger.debug(f"Inside single_tool_node...Result...: {result}")
+
+    return {"final_answer": result, "mcp_logs": new_mcp_logs, "messages": new_messages}
+
+
+async def workflow_node(state: OrchestratorState):
+    """Node to orchestrate main Astra workflow.
+
+    Conversationally collects repo_url, app_id, and environment one at a time
+    before running the workflow.
+    """
+    if state.route.get("workflow") != "update_rightsize_repo":
+        return {"final_answer": "Unsupported workflow"}
+    logger.debug(f"Inside workflow_node. OrchestratorState: {state = }")
+
+    # ── Step 1: Gather params from LLM route AND conversation history ─────────
+    route_params = state.route.get("params", {}) or {}
+
+    # Merge params already extracted by the LLM router with anything we can
+    # recover from the conversation history (for multi-turn collection).
+    history_params = _extract_workflow_params_from_history(state.messages)
+
+    # history_params acts as base; route_params overrides (LLM may have parsed
+    # the very latest user message, history_params covers earlier turns).
+    merged = {**history_params, **route_params}
+
+    repo_url = merged.get("repo_url") or merged.get("repo")
+    app_id = merged.get("app_id") or merged.get("appid")
+    environment = merged.get("environment") or merged.get("env")
+
+    # ── Step 2: Ask for any missing param (one at a time) ────────────────────
+    def _prompt(msg: str):
+        new_messages = state.messages + [{"role": "assistant", "content": msg}]
+        return {"final_answer": msg, "messages": new_messages}
+
+    if not repo_url:
+        logger.info("workflow_node: repo_url missing — prompting user")
+        return _prompt(
+            "Sure! To kick off the rightsizing workflow I need a few details.\n\n"
+            "What is the **Repository URL**? (e.g. `https://github.com/org/repo.git`)"
+        )
+
+    # Validate repo_url before moving on
+    repo_err = _validate_repo_url(repo_url)
+    if repo_err:
+        logger.info(f"workflow_node: invalid repo_url '{repo_url}' — re-prompting")
+        # Clear the bad value so history extractor won't reuse it next turn.
+        # We do this by returning the error as a fresh "ask repo" prompt so
+        # _extract_workflow_params_from_history will overwrite it on the next turn.
+        return _prompt(repo_err + "\n\nWhat is the **Repository URL**?")
+
+    if not app_id:
+        logger.info("workflow_node: app_id missing — prompting user")
+        return _prompt(
+            f"Got it — repo: `{repo_url}` ✅\n\n"
+            "What is the **App ID**? (e.g. `APP0002202`)"
+        )
+
+    # Validate app_id before moving on
+    appid_err = _validate_app_id(app_id)
+    if appid_err:
+        logger.info(f"workflow_node: invalid app_id '{app_id}' — re-prompting")
+        return _prompt(appid_err + "\n\nWhat is the **App ID**?")
+
+    if not environment:
+        logger.info("workflow_node: environment missing — prompting user")
+        return _prompt(
+            f"Almost there!\n\n"
+            f"- Repo: `{repo_url}` ✅\n"
+            f"- App ID: `{app_id}` ✅\n\n"
+            "Which **environment** would you like to target? (e.g. `dev`, `qa`, `prod`)"
+        )
+
+    # ── Step 3: All params collected — run the workflow ──────────────────────
+    logger.info(
+        f"workflow_node: all params ready — "
+        f"repo_url={repo_url}, app_id={app_id}, env={environment}"
+    )
+    env = environment
+    session_id = state.session_id or "s001"
+    user_id = state.user_id
+    branch = state.branch or "main"
+
+    # Get pre-built workflow graph from state (passed down from FastAPI app)
+    graph = state.rightsize_graph
+    logger.debug(f"workflow_node: Retrieved graph from state: {graph}")
+
+    if graph is None:
+        raise ValueError(
+            "Workflow graph not initialized. "
+            "Check FastAPI lifespan startup logs for checkpointer initialization errors."
+        )
+
+    result = await run_update_rightsize_workflow(
+        repo_url=repo_url,
+        env=env,
+        app_id=app_id,
+        user_id=user_id,
+        session_id=session_id,
+        branch=branch,
+        graph=graph,  # Pass pre-built graph
+    )
+
+    # Create user-friendly message instead of dumping full state
+    # Extract progress messages from workflow execution
+    progress_messages = []
+    if result.messages:
+        # Filter for assistant messages (progress updates from workflow nodes)
+        for msg in result.messages:
+            if isinstance(msg, dict):
+                if msg.get("type") == "ai" or msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if content and not content.startswith("⏸"):  # Skip pause messages
+                        progress_messages.append(content)
+
+    if result.hitl_checkpoint:
+        # Workflow paused at HITL checkpoint
+        checkpoint_name = result.hitl_checkpoint
+        friendly_message = f"⏸ **Workflow Paused - Approval Required**\n\n"
+
+        # Add progress summary
+        if progress_messages:
+            friendly_message += "**Progress:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += f"**Checkpoint:** {checkpoint_name}\n\n"
+
+        if checkpoint_name == "finops_validation":
+            rec_count = len(result.recommendations) if result.recommendations else 0
+            friendly_message += (
+                f"📊 **Status:** Fetched {rec_count} rightsizing recommendation(s) from FinOps\n"
+                f"👉 **Next Step:** Review and approve/reject using natural language in a chat."
+            )
+        elif checkpoint_name == "analysis_approval":
+            var_count = (
+                result.analysis_output.get("sizing_variables_count", 0)
+                if result.analysis_output
+                else 0
+            )
+            friendly_message += (
+                f"📋 **Status:** Analyzed Terraform infrastructure - found {var_count} sizing variable(s)\n\n"
+                f"👉 **Next Step:** Review and approve/reject using natural language in a chat."
+            )
+        elif checkpoint_name == "commit_approval":
+            files_modified = (
+                len(result.hitl_data.get("files_modified", []))
+                if result.hitl_data
+                else 0
+            )
+            friendly_message += (
+                f"📋 **Status:** Infrastructure updates ready for commit\n"
+                f"📄 Modified {files_modified} file(s)\n"
+                f"🌿 Branch: {result.feature_branch}\n\n"
+                f"👉 **Next Step:** Review and approve/reject using natural language in a chat."
+            )
+
+        final_answer = friendly_message
+    elif result.error:
+        # Workflow failed
+        friendly_message = "❌ **Workflow Failed**\n\n"
+
+        # Show progress before failure
+        if progress_messages:
+            friendly_message += "**Progress before failure:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += f"**Error:** {result.error}"
+        final_answer = friendly_message
+    elif result.pr:
+        # Workflow completed successfully
+        friendly_message = "✅ **Workflow Complete!**\n\n"
+
+        # Show all progress steps
+        if progress_messages:
+            friendly_message += "**Completed steps:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += (
+            f"**Pull Request:** {result.pr}\n"
+            f"**Branch:** {result.feature_branch}\n\n"
+            f"👉 **Next Step:** Review and merge the pull request."
+        )
+        final_answer = friendly_message
+
+    else:
+        # Workflow still running or completed without PR
+        friendly_message = f"✅ **Rightsizing Workflow Executed**\n\n"
+
+        # Show progress
+        if progress_messages:
+            friendly_message += "**Progress:**\n"
+            for msg in progress_messages:
+                friendly_message += f"✅ {msg}\n"
+            friendly_message += "\n"
+
+        friendly_message += (
+            f"**App ID:** {app_id}\n"
+            f"**Environment:** {env}\n"
+            f"**Session ID:** {session_id}\n\n"
+            f"👉 Check workflow status in the sidebar."
+        )
+        final_answer = friendly_message
+
+    new_mcp_logs = state.mcp_logs + [
+        {
+            "tool": "update_rightsize_workflow",
+            "params": {
+                "repo_url": repo_url,
+                "environment": env,
+                "app_id": app_id,
+                "session_id": session_id,
+            },
+            "status": "Success",
+        }
+    ]
+    new_messages = state.messages + [{"role": "assistant", "content": final_answer}]
+
+    return {
+        "final_answer": final_answer,
+        "mcp_logs": new_mcp_logs,
+        "messages": new_messages,
+    }
+
+
+async def none_node(state: OrchestratorState):
+    """Node to handle empty input."""
+    answer = state.route["message"]
+    new_messages = state.messages + [{"role": "assistant", "content": answer}]
+    return {"final_answer": answer, "messages": new_messages}
+
+
+async def greeting_node(state: OrchestratorState):
+    """Node to handle greeting input.
+
+    If the user said 'go app' (or similar), emit a warm welcome and immediately
+    start param collection for the rightsizing workflow.
+    """
+    if _is_go_app_trigger(state.user_input):
+        greeting = (
+            "👋 Hey there! Welcome to **Astra Rightsizing Workflow** — let's get started!\n\n"
+            "I'll walk you through the process step by step.\n\n"
+            "What is the **Repository URL** for the app you'd like to rightsize? "
+            "(e.g. `https://github.com/org/repo.git`)"
+        )
+        new_messages = state.messages + [{"role": "assistant", "content": greeting}]
+        return {"final_answer": greeting, "messages": new_messages}
+
+    if _is_rightsize_app_trigger(state.user_input):
+        app_id = _extract_app_id_from_trigger(state.user_input)
+        greeting = (
+            f"👋 Let's rightsize app **{app_id}**!\n\n"
+            "What is the **Repository URL** for this app? "
+            "(e.g. `https://github.com/org/repo.git`)"
+        )
+        new_messages = state.messages + [{"role": "assistant", "content": greeting}]
+        return {"final_answer": greeting, "messages": new_messages}
+
+    answer = state.route.get("message", "Hello! How can I help you?")
+    new_messages = state.messages + [{"role": "assistant", "content": answer}]
+    return {"final_answer": answer, "messages": new_messages}
+
+
+async def orchestrator(
+    user_input: str,
+    mcp_logs: list,
+    messages: list,
+    session_id: str,
+    user_id: str,
+    rightsize_graph=None,  # Pre-built graph passed from FastAPI app.state
+):
+    """
+    Main orchestrator of the Astra MCP Agent Server.
+    Organizes:
+        - different types of workflows using LangGraph router pattern
+        - external communication using /chat and /tools endpoints.
+    """
+    # Ensure session_id is not None; should fail later if not provided
+    session_id = session_id or str(uuid4())
+
+    # Ensure user_id is not None; should fail later if not provided
+    user_id = user_id or "fake_user"
+
+    # Add user's current input to messages BEFORE processing
+    # This ensures the user's message is included in the conversation history
+    messages_with_input = messages + [{"role": "user", "content": user_input}]
+
+    # ── "go app" shortcut: skip LLM router, go straight to greetings node
+    # which will emit a welcome + first param prompt ──────────────────────────
+    logger.debug(
+        f"In the orchestrator, calling LLM with: {user_input = }, {messages = }"
+    )
+    if _is_go_app_trigger(user_input):
+        logger.info("'go app' trigger detected — routing to greetings node for workflow start")
+        route_decision = {
+            "workflow": "greetings",
+            "message": "",   # greeting_node will build its own message
+            "params": {},
+        }
+    elif _is_rightsize_app_trigger(user_input):
+        logger.info("'rightsize app <id>' trigger detected — routing to greetings node")
+        app_id = _extract_app_id_from_trigger(user_input)
+        route_decision = {
+            "workflow": "greetings",
+            "message": "",
+            "params": {"app_id": app_id},
+        }
+    # ── Mid-collection: if last assistant message was a param question,
+    # route to workflow_node so it can parse the answer ──────────────────────
+    elif _is_collecting_workflow_params(messages):
+        logger.info("Mid-param-collection detected — routing to update_rightsize_repo")
+        # Use whatever the LLM extracted from this latest message; workflow_node
+        # will also scan history for earlier answers.
+        route_decision = await llm_client.ask_llm(user_input, messages)
+        route_decision["workflow"] = "update_rightsize_repo"
+        if "params" not in route_decision or route_decision["params"] is None:
+            route_decision["params"] = {}
+    else:
+        # Normal LLM router call
+        route_decision = await llm_client.ask_llm(user_input, messages)
+    logger.debug(f"Route: {route_decision = }")
+
+    # Create graph state with accumulated messages (including current user input)
+    orch_state = OrchestratorState(
+        user_input=user_input,
+        session_id=session_id,
+        messages=messages_with_input,  # Include user's current message
+        mcp_logs=mcp_logs,
+        route=route_decision,
+        final_answer=None,
+        user_id=user_id,
+        rightsize_graph=rightsize_graph,  # Pass pre-built graph through state
+    )
+    logger.debug(f"Initializing with OrchestratorState: {orch_state = }")
+
+    # Build LangGraph
+    orchestrator_graph = StateGraph(OrchestratorState)
+    orchestrator_graph.add_node("router", lambda s: {"route": s.route})
+    orchestrator_graph.set_entry_point("router")
+
+    orchestrator_graph.add_edge("router", orch_state.route["workflow"])
+
+    orchestrator_graph.add_node("none", none_node)
+    orchestrator_graph.add_node("greetings", greeting_node)
+    orchestrator_graph.add_node("general_question", general_question_node)
+    orchestrator_graph.add_node("single_tool", single_tool_node)
+    orchestrator_graph.add_node("update_rightsize_repo", workflow_node)
+
+    orchestrator_graph.add_edge("none", END)
+    orchestrator_graph.add_edge("greetings", END)
+    orchestrator_graph.add_edge("general_question", END)
+    orchestrator_graph.add_edge("single_tool", END)
+    orchestrator_graph.add_edge("update_rightsize_repo", END)
+
+    logger.debug(f"Orchestrator Graph: {orchestrator_graph}")
+
+    # Compile and execute with no checkpointer
+    app = orchestrator_graph.compile()
+    logger.info("Orchestrator compiled.")
+    logger.debug(f"App: {app} will be invoked with {orch_state = }")
+    try:
+        # Bug fix: Add config with thread_id for LangGraph checkpointing
+        config = {"configurable": {"thread_id": session_id}}
+        logger.debug(f"Invoking orchestrator with checkpoint config: {config}")
+        result_state = await app.ainvoke(orch_state, config=config)
+    except Exception as e:
+        logger.error(f"Orchestrator failed: {e} {traceback.format_exc()}")
+        result_state = {"final_answer": f"Orchestrator failed: {e}"}
+    logger.debug(f"In orchestrator result State before return: {result_state}")
+    logger.info("Orchestration complete.")
+
+    return (
+        result_state["final_answer"],
+        result_state["messages"],
+        result_state["mcp_logs"],
+    )
+
+
+
+
+
