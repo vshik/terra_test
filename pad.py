@@ -3428,8 +3428,13 @@ def _extract_workflow_params_from_history(messages: list) -> dict:
     start_idx = _find_current_workflow_start(messages)
     scoped_messages = messages[start_idx:]
 
-    # Pre-seed app_id if the workflow was started with a "rightsize app <id>" trigger
-    for msg in scoped_messages:
+    # Pre-seed app_id if the workflow was started with a "rightsize app <id>" trigger.
+    # The trigger user message sits just BEFORE the assistant greeting (the workflow-start
+    # boundary at start_idx), so search the message immediately before start_idx as well
+    # as scoped_messages — the scoped window starts at the assistant greeting and therefore
+    # excludes the user message that caused it.
+    search_window = messages[max(0, start_idx - 1): start_idx + 1] + list(scoped_messages)
+    for msg in search_window:
         if isinstance(msg, dict) and msg.get("role") == "user":
             content = msg.get("content", "")
             if _is_rightsize_app_trigger(content):
@@ -3908,8 +3913,3 @@ async def orchestrator(
         result_state["messages"],
         result_state["mcp_logs"],
     )
-
-
-
-
-
