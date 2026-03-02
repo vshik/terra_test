@@ -722,3 +722,43 @@ if __name__ == "__main__":
     match_files("terraform_analysis.json", "finops_data.json")
 
 
+I'm sharing a Python codebase with multiple sub-directories. Please analyze it thoroughly and produce a structured technical document that covers:
+
+1. **Project Overview**
+   - What does this project do? (2-3 sentence summary)
+   - What problem does it solve?
+   - Key technologies, frameworks, and libraries used
+
+2. **Architecture & Structure**
+   - Directory/folder breakdown — what each folder is responsible for
+   - High-level architecture diagram (as ASCII or Mermaid)
+   - Design patterns used (e.g., MVC, pipeline, microservices)
+
+3. **Core Modules & Components**
+   - For each major module/file: purpose, key classes, key functions
+   - How modules relate to and depend on each other
+
+4. **Data Flow**
+   - How data enters the system (inputs/sources)
+   - How it's processed, transformed, and passed between components
+   - How it exits the system (outputs/sinks)
+
+5. **Key Functions & Classes**
+   - The most important functions/classes and what they do
+   - Any critical algorithms or logic worth noting
+
+6. **Configuration & Dependencies**
+   - External libraries/packages (from requirements.txt or imports)
+   - Environment variables or config files
+   - Any external APIs or services integrated
+
+7. **Entry Points**
+   - How is the application run/started?
+   - CLI commands, main scripts, or API endpoints
+
+8. **Summary & Notes**
+   - Any observations about code quality, patterns, or areas of complexity
+   - Potential areas to investigate further
+
+Please output this as a well-formatted Word document (.docx) I can share with my team.
+
